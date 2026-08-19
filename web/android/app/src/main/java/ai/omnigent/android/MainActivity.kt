@@ -74,6 +74,8 @@ class MainActivity : AppCompatActivity() {
     // field and the fresh page simply has no pending input. No hang or crash.
     private var pendingFileCallback: ValueCallback<Array<Uri>>? = null
     private var pendingMicRequest: PermissionRequest? = null
+    private var startMonitorAfterPermission = false
+    private var enablePushAfterPermission = false
 
     private val requestNotifications =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -81,7 +83,13 @@ class MainActivity : AppCompatActivity() {
             // web layer keeps working without OS toasts. Granted: replay the
             // badge the web layer may have computed (and deduped) while the
             // permission dialog was still open — its post was silently dropped.
-            if (granted) notifications.replayBadge()
+            if (granted) {
+                notifications.replayBadge()
+                if (startMonitorAfterPermission) enablePollingFallback()
+                if (enablePushAfterPermission) enableUnifiedPush()
+            }
+            startMonitorAfterPermission = false
+            enablePushAfterPermission = false
         }
 
     private val requestMic =
@@ -111,6 +119,7 @@ class MainActivity : AppCompatActivity() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
 
         val store = ServerStore(this)
+        notificationServerOf(intent)?.let(store::connect)
         if (!store.hasServer()) {
             // No server configured yet — send the user to the connect screen first.
             startActivity(Intent(this, ConnectActivity::class.java))
@@ -131,7 +140,7 @@ class MainActivity : AppCompatActivity() {
         if (BuildConfig.DEBUG) WebView.setWebContentsDebuggingEnabled(true) // chrome://inspect
 
         webView =
-            WebView(this).apply {
+            PrivateInputWebView(this).apply {
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = true
                 settings.mediaPlaybackRequiresUserGesture = false
@@ -276,13 +285,32 @@ class MainActivity : AppCompatActivity() {
             },
         )
 
+        if (SessionMonitorStore(this).enabled && PushRegistrationManager(this).registered) {
+            SessionMonitorService.stop(this)
+        } else if (SessionMonitorStore(this).enabled) {
+            if (canPostNotifications()) {
+                SessionMonitorService.start(this)
+            } else {
+                startMonitorAfterPermission = true
+            }
+        }
         ensureNotificationPermission()
         webView.loadUrl(serverUrl)
     }
 
+    override fun onStart() {
+        super.onStart()
+        SessionMonitorStore.appVisible = true
+    }
+
+    override fun onStop() {
+        SessionMonitorStore.appVisible = false
+        super.onStop()
+    }
+
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        applySystemBarContrast()
+        applySystemBarContrast(newConfig)
         if (::webView.isInitialized) {
             // Notify matchMedia listeners without reloading the SPA.
             webView.dispatchConfigurationChanged(newConfig)
@@ -329,9 +357,11 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun applySystemBarContrast() {
+    private fun applySystemBarContrast(
+        configuration: Configuration = resources.configuration,
+    ) {
         val isLightMode =
-            resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK !=
+            configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK !=
                 Configuration.UI_MODE_NIGHT_YES
         WindowInsetsControllerCompat(window, window.decorView).apply {
             isAppearanceLightStatusBars = isLightMode
@@ -497,6 +527,7 @@ class MainActivity : AppCompatActivity() {
         // bridge is origin-allowlisted, so a server switch without re-registering
         // leaves the bridge dead for the new origin.
         val store = ServerStore(this)
+        notificationServerOf(intent)?.let(store::connect)
         val newServerUrl = store.currentServerUrl()
         val newOrigin = originOf(newServerUrl)
         if (newOrigin != null && newOrigin != pinnedOrigin) {
@@ -567,6 +598,30 @@ class MainActivity : AppCompatActivity() {
             // Group 2: actions (divider before this group).
             add(2, 3, 0, getString(R.string.menu_reload))
             add(2, 4, 0, getString(R.string.menu_connect_new))
+            add(
+                2,
+                6,
+                0,
+                getString(
+                    if (PushRegistrationManager(this@MainActivity).enabled) {
+                        R.string.menu_disable_push
+                    } else {
+                        R.string.menu_enable_push
+                    },
+                ),
+            )
+            add(
+                2,
+                5,
+                0,
+                getString(
+                    if (SessionMonitorStore(this@MainActivity).enabled) {
+                        R.string.menu_disable_monitor
+                    } else {
+                        R.string.menu_enable_monitor
+                    },
+                ),
+            )
         }
         popup.setOnMenuItemClickListener { item ->
             when (item.itemId) {
@@ -577,6 +632,16 @@ class MainActivity : AppCompatActivity() {
 
                 4 -> {
                     startActivity(Intent(this@MainActivity, ConnectActivity::class.java))
+                    true
+                }
+
+                5 -> {
+                    toggleSessionMonitor()
+                    true
+                }
+
+                6 -> {
+                    toggleUnifiedPush()
                     true
                 }
 
@@ -613,6 +678,9 @@ class MainActivity : AppCompatActivity() {
         loginAttempts = 0 // reached a pinned-origin page — we're past the login redirect
         flushPendingActivation()
         emitInsets()
+        if (PushRegistrationManager(this).enabled) {
+            PushRegistrationManager(this).uploadStoredEndpoint()
+        }
     }
 
     private fun flushPendingActivation() {
@@ -629,6 +697,11 @@ class MainActivity : AppCompatActivity() {
         intent
             ?.getStringExtra(NativeNotificationManager.EXTRA_NAVIGATE_PATH)
             ?.takeIf { it.startsWith("/") }
+
+    private fun notificationServerOf(intent: Intent?): String? =
+        intent
+            ?.getStringExtra(NativeNotificationManager.EXTRA_SERVER_URL)
+            ?.let(::normalizeServerUrl)
 
     private fun emitNotificationActivation(path: String?) {
         if (path == null) return
@@ -677,6 +750,47 @@ class MainActivity : AppCompatActivity() {
 
     private fun hasPermission(permission: String): Boolean =
         ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
+
+    private fun canPostNotifications(): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            hasPermission(Manifest.permission.POST_NOTIFICATIONS)
+
+    private fun toggleSessionMonitor() {
+        if (SessionMonitorStore(this).enabled) {
+            SessionMonitorService.stop(this)
+            return
+        }
+        if (canPostNotifications()) {
+            enablePollingFallback()
+        } else {
+            startMonitorAfterPermission = true
+            ensureNotificationPermission()
+        }
+    }
+
+    private fun toggleUnifiedPush() {
+        val registration = PushRegistrationManager(this)
+        if (registration.enabled) {
+            registration.disable()
+            return
+        }
+        if (canPostNotifications()) {
+            enableUnifiedPush()
+        } else {
+            enablePushAfterPermission = true
+            ensureNotificationPermission()
+        }
+    }
+
+    private fun enableUnifiedPush() {
+        PushRegistrationManager(this).enable(this)
+    }
+
+    private fun enablePollingFallback() {
+        val registration = PushRegistrationManager(this)
+        if (registration.enabled) registration.disable()
+        SessionMonitorService.start(this)
+    }
 
     private fun ensureNotificationPermission() {
         // Notification permission is granted at install time below API 33.

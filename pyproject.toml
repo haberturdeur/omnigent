@@ -131,6 +131,8 @@ dependencies = [
     # `omnigent server start` without it. POSIX platforms use the system
     # database and don't need the wheel.
     "tzdata>=2024.1; platform_system == 'Windows'",
+    # Standards-based encrypted Web Push delivery for UnifiedPush clients.
+    "pywebpush>=2.3,<3",
 ]
 
 [project.optional-dependencies]

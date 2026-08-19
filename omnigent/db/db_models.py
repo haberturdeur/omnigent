@@ -394,6 +394,55 @@ class SqlUser(OmnigentBase):
     last_login_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
+class SqlPushSubscription(OmnigentBase):
+    """Per-user RFC 8030 Web Push endpoint registered by a client device."""
+
+    __tablename__ = "push_subscriptions"
+
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
+    user_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    device_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    endpoint: Mapped[str] = mapped_column(Text, nullable=False)
+    endpoint_hash: Mapped[bytes] = mapped_column(_CKSUM32, nullable=False)
+    p256dh: Mapped[str] = mapped_column(String(128), nullable=False)
+    auth: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    __table_args__ = (
+        Index(
+            "uq_push_subscriptions_endpoint",
+            "workspace_id",
+            "endpoint_hash",
+            unique=True,
+        ),
+        Index("ix_push_subscriptions_user", "workspace_id", "user_id"),
+    )
+
+
+class SqlWebPushConfig(OmnigentBase):
+    """Workspace-scoped VAPID keypair used for Web Push authentication."""
+
+    __tablename__ = "web_push_config"
+
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
+    private_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    public_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
 class SqlAccountToken(OmnigentBase):
     """
     SQLAlchemy model for the ``account_tokens`` table.

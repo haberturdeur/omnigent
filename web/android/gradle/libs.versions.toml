@@ -18,6 +18,7 @@ espresso = "3.7.0"
 uiautomator = "2.4.0"
 # Gradle Play Publisher 4.x supports AGP 9.x; 3.x does not.
 playPublisher = "4.0.0"
+unifiedPush = "3.0.10"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "androidxCore" }
@@ -32,6 +33,7 @@ androidx-test-rules = { group = "androidx.test", name = "rules", version.ref = "
 androidx-test-ext-junit = { group = "androidx.test.ext", name = "junit", version.ref = "androidxTestExtJunit" }
 espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espresso" }
 uiautomator = { group = "androidx.test.uiautomator", name = "uiautomator", version.ref = "uiautomator" }
+unifiedpush-connector = { group = "org.unifiedpush.android", name = "connector", version.ref = "unifiedPush" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

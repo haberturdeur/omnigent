@@ -1,6 +1,7 @@
 package ai.omnigent.android
 
 import android.content.Context
+import android.content.Intent
 import android.content.RestrictionsManager
 import android.content.res.Configuration
 import android.os.Bundle
@@ -22,6 +23,21 @@ import org.robolectric.shadows.ShadowRestrictionsManager
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
 class MainActivityTest {
+    @Test
+    fun `notification launch selects its source server`() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        ServerStore(context).connect("https://two.example")
+        val intent =
+            Intent(context, MainActivity::class.java).apply {
+                putExtra(NativeNotificationManager.EXTRA_SERVER_URL, "https://one.example")
+                putExtra(NativeNotificationManager.EXTRA_NAVIGATE_PATH, "/c/session-a")
+            }
+
+        Robolectric.buildActivity(MainActivity::class.java, intent).setup().get()
+
+        assertEquals("https://one.example", ServerStore(context).currentServerUrl())
+    }
+
     @Test
     fun `webview leaves algorithmic darkening disabled`() {
         ServerStore(ApplicationProvider.getApplicationContext()).connect("https://example.com")

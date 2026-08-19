@@ -95,8 +95,8 @@ fun databricksWorkspaceUiUrl(url: String?): String? {
 }
 
 /**
- * Normalize user-entered server text into a loadable URL, or null if it isn't a
- * usable http(s) address. Adds a default `https://` scheme when omitted and
+ * Normalize user-entered server text into a TLS URL, or null if it isn't a
+ * usable HTTPS address. Adds the required `https://` scheme when omitted and
  * trims a trailing slash.
  */
 fun normalizeServerUrl(input: String): String? {
@@ -107,7 +107,7 @@ fun normalizeServerUrl(input: String): String? {
     val withScheme = if (trimmed.contains("://")) trimmed else "https://$trimmed"
     val uri = Uri.parse(withScheme)
     val scheme = uri.scheme?.lowercase() ?: return null
-    if (!isHttpScheme(scheme)) return null
+    if (scheme != "https") return null
     if (uri.host.isNullOrBlank()) return null
     return withScheme.trimEnd('/')
 }

@@ -61,6 +61,10 @@ from omnigent.server.performance_metrics import (
     set_request_session_id_for_access_log,
     set_request_user_agent_for_access_log,
 )
+from omnigent.server.push_notifications import (
+    PushNotificationDispatcher,
+    PushSubscriptionStore,
+)
 from omnigent.server.routes.builtin_agents import create_builtin_agents_router
 from omnigent.server.routes.comments import create_comments_router
 from omnigent.server.routes.default_policies import create_default_policies_router
@@ -69,6 +73,7 @@ from omnigent.server.routes.harnesses import create_harnesses_router
 from omnigent.server.routes.imports import create_imports_router
 from omnigent.server.routes.policy_registry import create_policy_registry_router
 from omnigent.server.routes.projects import create_projects_router
+from omnigent.server.routes.push_notifications import create_push_notifications_router
 from omnigent.server.routes.runner_tunnel import create_runner_tunnel_router
 from omnigent.server.routes.scheduled_tasks import create_scheduled_tasks_router
 from omnigent.server.routes.session_mcp_servers import create_session_mcp_servers_router
@@ -1113,6 +1118,7 @@ def create_app(
     _mcp_pool = ServerMcpPool()
     server_metrics = ServerPerformanceMetrics()
     server_metrics_otel = ServerMetricsOtelPublisher()
+    push_subscription_store = PushSubscriptionStore(conversation_store.storage_location)
 
     @asynccontextmanager
     async def _lifespan(
@@ -1306,9 +1312,19 @@ def create_app(
             # endpoints (see routes/scheduled_tasks.py); there is no startup
             # sweep and no periodic reconcile.
 
+        from omnigent.runtime.session_stream import configure_notification_sink
+
+        push_dispatcher = PushNotificationDispatcher(
+            store=push_subscription_store,
+            conversation_store=conversation_store,
+            permission_store=permission_store,
+        )
+        uninstall_push_sink = configure_notification_sink(push_dispatcher.observe)
         try:
             yield
         finally:
+            uninstall_push_sink()
+            push_dispatcher.close()
             # Run completion is event-driven (the _publish_status hook) plus a
             # lazy-on-read stale backstop — there is no run-reconciler task to
             # cancel. Only the per-job scheduler holds timers that need stopping.
@@ -2236,6 +2252,14 @@ def create_app(
         ),
         prefix="/v1",
         tags=["usage"],
+    )
+    app.include_router(
+        create_push_notifications_router(
+            push_subscription_store,
+            auth_provider=auth_provider,
+        ),
+        prefix="/v1",
+        tags=["push_notifications"],
     )
     # Read-only built-in agent discovery (designs/BUILTIN_AGENTS.md).
     # Successor to the removed GET /api/agents list; lists only

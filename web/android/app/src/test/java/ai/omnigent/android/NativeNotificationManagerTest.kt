@@ -1,6 +1,7 @@
 package ai.omnigent.android
 
 import android.app.Application
+import android.app.Notification
 import android.app.NotificationManager
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
@@ -26,7 +27,15 @@ class NativeNotificationManagerTest {
 
     @Before
     fun setUp() {
+        SessionMonitorStore.appVisible = false
         context = ApplicationProvider.getApplicationContext()
+        context
+            .getSharedPreferences(
+                "ai.omnigent.android.notification_deliveries",
+                Context.MODE_PRIVATE,
+            ).edit()
+            .clear()
+            .commit()
         manager = NativeNotificationManager(context)
         shadow =
             shadowOf(
@@ -35,6 +44,19 @@ class NativeNotificationManagerTest {
     }
 
     private fun badgeNotification() = shadow.getNotification(badgeId)
+
+    @Test
+    fun `foreground web notifications and badge summaries are suppressed`() {
+        manager.setBadgeCount(2, navigatePath = "/inbox")
+        assertNotNull(badgeNotification())
+
+        SessionMonitorStore.appVisible = true
+        manager.setBadgeCount(2, navigatePath = "/inbox")
+        manager.notify("Duplicate", "body", "/c/session-a")
+
+        assertNull(badgeNotification())
+        assertEquals(0, shadow.allNotifications.size)
+    }
 
     @Test
     fun `badge posts a summary notification with the count and tap intent`() {
@@ -101,6 +123,130 @@ class NativeNotificationManagerTest {
         assertEquals(
             "/inbox",
             intent.getStringExtra(NativeNotificationManager.EXTRA_NAVIGATE_PATH),
+        )
+    }
+
+    @Test
+    fun `session push tap carries its source server and session path`() {
+        manager.notify(
+            SessionAttentionEvent(
+                MonitoredSession("session-a", "A", "idle", 0),
+                SessionAttentionEvent.Kind.COMPLETED,
+            ),
+            serverUrl = "https://one.example",
+        )
+
+        val posted = shadow.getNotification("session:session-a", 3)
+        val intent = shadowOf(posted.contentIntent).savedIntent
+        assertEquals(
+            "/c/session-a",
+            intent.getStringExtra(NativeNotificationManager.EXTRA_NAVIGATE_PATH),
+        )
+        assertEquals(
+            "https://one.example",
+            intent.getStringExtra(NativeNotificationManager.EXTRA_SERVER_URL),
+        )
+    }
+
+    @Test
+    fun `binary approval push exposes approve always and reject actions`() {
+        manager.notify(
+            SessionAttentionEvent(
+                MonitoredSession("session-a", "A", "idle", 1),
+                SessionAttentionEvent.Kind.NEEDS_INPUT,
+                NotificationApproval(
+                    instance = "server-instance",
+                    sessionId = "session-a",
+                    elicitationId = "elicit-a",
+                    description = "Codex wants to run git status",
+                    persistent = NotificationApproval.PersistentAction.REMEMBER,
+                ),
+            ),
+        )
+
+        val posted = shadow.getNotification("session:session-a", 3)
+        assertEquals(
+            "Codex wants to run git status",
+            posted.extras.getString(Notification.EXTRA_TEXT),
+        )
+        assertEquals(
+            "Codex wants to run git status",
+            posted.extras.getString(Notification.EXTRA_BIG_TEXT),
+        )
+        assertEquals(
+            Notification.FLAG_ONLY_ALERT_ONCE,
+            posted.flags and Notification.FLAG_ONLY_ALERT_ONCE,
+        )
+        assertEquals(
+            listOf("Approve", "Always allow", "Reject"),
+            posted.actions.map { it.title.toString() },
+        )
+        val approveIntent = shadowOf(posted.actions[0].actionIntent).savedIntent
+        assertEquals(
+            ApprovalActionReceiver.ACTION_APPROVE,
+            approveIntent.getStringExtra(ApprovalActionReceiver.EXTRA_ACTION),
+        )
+        assertEquals(
+            "server-instance",
+            approveIntent.getStringExtra(ApprovalActionReceiver.EXTRA_INSTANCE),
+        )
+        assertEquals(
+            "elicit-a",
+            approveIntent.getStringExtra(ApprovalActionReceiver.EXTRA_ELICITATION_ID),
+        )
+    }
+
+    @Test
+    fun `duplicate session event keeps the first posted notification`() {
+        val first =
+            SessionAttentionEvent(
+                MonitoredSession("session-a", "First", "idle", 1),
+                SessionAttentionEvent.Kind.NEEDS_INPUT,
+            )
+        val duplicate =
+            SessionAttentionEvent(
+                MonitoredSession("session-a", "Duplicate", "idle", 1),
+                SessionAttentionEvent.Kind.NEEDS_INPUT,
+            )
+
+        manager.notify(first)
+        manager.notify(duplicate)
+
+        assertEquals(
+            "First",
+            shadow.getNotification("session:session-a", 3).extras.getString(Notification.EXTRA_TITLE),
+        )
+    }
+
+    @Test
+    fun `resolved notification id stays dismissed while a new id can post`() {
+        val resolved =
+            SessionAttentionEvent(
+                MonitoredSession("session-a", "Resolved", "idle", 1),
+                SessionAttentionEvent.Kind.NEEDS_INPUT,
+                notificationId = "approval:one",
+            )
+        manager.notify(resolved)
+        assertNotNull(shadow.getNotification("session:session-a", 3))
+
+        manager.dismissSessionNotification("session-a", "approval:one")
+        assertNull(shadow.getNotification("session:session-a", 3))
+
+        manager.notify(resolved)
+        assertNull(shadow.getNotification("session:session-a", 3))
+
+        manager.notify(
+            resolved.copy(
+                session = resolved.session.copy(title = "New approval"),
+                notificationId = "approval:two",
+            ),
+        )
+        assertEquals(
+            "New approval",
+            shadow
+                .getNotification("session:session-a", 3)
+                .extras
+                .getString(Notification.EXTRA_TITLE),
         )
     }
 }

@@ -57,6 +57,25 @@ _subscribers: dict[
     set[tuple[asyncio.Queue[dict[str, Any] | object], asyncio.AbstractEventLoop]],
 ] = {}
 _lock = threading.Lock()
+_notification_sink: Callable[[str, dict[str, Any]], None] | None = None
+
+
+def configure_notification_sink(
+    sink: Callable[[str, dict[str, Any]], None] | None,
+) -> Callable[[], None]:
+    """Install a best-effort observer for server-side push notifications."""
+    global _notification_sink
+    with _lock:
+        previous = _notification_sink
+        _notification_sink = sink
+
+    def uninstall() -> None:
+        global _notification_sink
+        with _lock:
+            if _notification_sink is sink:
+                _notification_sink = previous
+
+    return uninstall
 
 
 def _enqueue_or_overflow(
@@ -115,6 +134,12 @@ def publish(conversation_id: str, event: dict[str, Any]) -> None:
         return
     with _lock:
         subs = list(_subscribers.get(conversation_id, ()))
+        notification_sink = _notification_sink
+    if notification_sink is not None:
+        try:
+            notification_sink(conversation_id, event)
+        except Exception:  # Notification delivery is best-effort.
+            _logger.exception("push notification observer failed")
     for queue, loop in subs:
         loop.call_soon_threadsafe(_enqueue_or_overflow, queue, live_event)
 
