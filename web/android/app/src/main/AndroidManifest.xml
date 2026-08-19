@@ -6,6 +6,7 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- Runtime-requested when the web UI first asks for the mic (voice input). -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
@@ -50,6 +51,11 @@
             android:exported="false"
             android:windowSoftInputMode="adjustResize" />
 
+        <activity
+            android:name=".NotificationRouterActivity"
+            android:exported="false"
+            android:noHistory="true" />
+
         <service
             android:name=".SessionMonitorService"
             android:exported="false"
@@ -70,6 +76,15 @@
         <receiver
             android:name=".ApprovalActionReceiver"
             android:exported="false" />
+
+        <receiver
+            android:name=".SessionMonitorBootReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
     </application>
 
 </manifest>

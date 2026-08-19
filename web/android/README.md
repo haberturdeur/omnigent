@@ -56,18 +56,25 @@ receives session attention events the account may access.
 Registrations are isolated per configured Omnigent server; tapping a
 notification switches back to its source server before opening the session.
 Binary approval notifications expose **Approve**, the applicable **Always
-allow** option, and **Reject** actions. The encrypted push carries only opaque
-identifiers, action capability flags, and a capped approval description so the
-notification can identify the requested command. The distributor sees Web Push
-ciphertext, but Android may show the description on the lock screen. Structured
-approvals must be reviewed inside the app.
+allow** option, and **Reject** actions. The encrypted push carries opaque
+identifiers, action capability flags, a capped session title, and a capped
+approval description so the notification can identify the requested command.
+The distributor sees Web Push ciphertext, but Android may show the title and
+description on the lock screen. Structured approvals must be reviewed inside
+the app.
+
+Web Push endpoints must resolve exclusively to public IP addresses to prevent
+notification delivery from reaching internal services. Self-hosted private
+push endpoints require the explicit server setting
+`OMNIGENT_WEBPUSH_ALLOW_PRIVATE_ENDPOINTS=true`; use it only for a trusted
+endpoint on your private network.
 
 For devices without a UnifiedPush distributor, **Enable Polling Fallback** starts
 a native foreground service that checks `GET /v1/sessions` every 10 seconds with
 the WebView's authenticated cookie. Android displays a persistent low-priority
 monitor notification so its battery/network cost stays visible. **Stop** on that
-notification or **Disable Polling Fallback** turns it off. Once a UnifiedPush
-distributor accepts registration, the app automatically disables the fallback;
+notification or **Disable Polling Fallback** turns it off. Once the Omnigent
+server accepts the UnifiedPush subscription, the app disables the fallback;
 a failed attempt leaves the working fallback untouched. Enabling the fallback
 manually disables UnifiedPush so both transports cannot notify for one event.
 When UnifiedPush has a valid endpoint, the web-to-native notification bridge

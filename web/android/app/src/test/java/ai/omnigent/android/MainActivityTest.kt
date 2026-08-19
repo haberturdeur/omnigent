@@ -24,7 +24,7 @@ import org.robolectric.shadows.ShadowRestrictionsManager
 @Config(sdk = [35])
 class MainActivityTest {
     @Test
-    fun `notification launch selects its source server`() {
+    fun `exported launcher ignores a supplied notification server`() {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
         ServerStore(context).connect("https://two.example")
         val intent =
@@ -34,6 +34,21 @@ class MainActivityTest {
             }
 
         Robolectric.buildActivity(MainActivity::class.java, intent).setup().get()
+
+        assertEquals("https://two.example", ServerStore(context).currentServerUrl())
+    }
+
+    @Test
+    fun `internal notification router selects its source server`() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        ServerStore(context).connect("https://two.example")
+        val intent =
+            Intent(context, NotificationRouterActivity::class.java).apply {
+                putExtra(NativeNotificationManager.EXTRA_SERVER_URL, "https://one.example")
+                putExtra(NativeNotificationManager.EXTRA_NAVIGATE_PATH, "/c/session-a")
+            }
+
+        Robolectric.buildActivity(NotificationRouterActivity::class.java, intent).setup()
 
         assertEquals("https://one.example", ServerStore(context).currentServerUrl())
     }

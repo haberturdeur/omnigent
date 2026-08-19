@@ -138,6 +138,7 @@ class NativeNotificationManagerTest {
 
         val posted = shadow.getNotification("session:session-a", 3)
         val intent = shadowOf(posted.contentIntent).savedIntent
+        assertEquals(NotificationRouterActivity::class.java.name, intent.component!!.className)
         assertEquals(
             "/c/session-a",
             intent.getStringExtra(NativeNotificationManager.EXTRA_NAVIGATE_PATH),
@@ -227,13 +228,13 @@ class NativeNotificationManagerTest {
                 notificationId = "approval:one",
             )
         manager.notify(resolved)
-        assertNotNull(shadow.getNotification("session:session-a", 3))
+        assertNotNull(shadow.getNotification("notification:approval:one", 3))
 
         manager.dismissSessionNotification("session-a", "approval:one")
-        assertNull(shadow.getNotification("session:session-a", 3))
+        assertNull(shadow.getNotification("notification:approval:one", 3))
 
         manager.notify(resolved)
-        assertNull(shadow.getNotification("session:session-a", 3))
+        assertNull(shadow.getNotification("notification:approval:one", 3))
 
         manager.notify(
             resolved.copy(
@@ -244,9 +245,33 @@ class NativeNotificationManagerTest {
         assertEquals(
             "New approval",
             shadow
-                .getNotification("session:session-a", 3)
+                .getNotification("notification:approval:two", 3)
                 .extras
                 .getString(Notification.EXTRA_TITLE),
         )
+    }
+
+    @Test
+    fun `two exact approvals in one session remain independently visible`() {
+        val base =
+            SessionAttentionEvent(
+                MonitoredSession("session-a", "First", "idle", 1),
+                SessionAttentionEvent.Kind.NEEDS_INPUT,
+                notificationId = "approval:one",
+            )
+
+        manager.notify(base)
+        manager.notify(
+            base.copy(
+                session = base.session.copy(title = "Second"),
+                notificationId = "approval:two",
+            ),
+        )
+
+        assertNotNull(shadow.getNotification("notification:approval:one", 3))
+        assertNotNull(shadow.getNotification("notification:approval:two", 3))
+        manager.dismissSessionNotification("session-a", "approval:one")
+        assertNull(shadow.getNotification("notification:approval:one", 3))
+        assertNotNull(shadow.getNotification("notification:approval:two", 3))
     }
 }

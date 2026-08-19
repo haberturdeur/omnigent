@@ -119,7 +119,6 @@ class MainActivity : AppCompatActivity() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
 
         val store = ServerStore(this)
-        notificationServerOf(intent)?.let(store::connect)
         if (!store.hasServer()) {
             // No server configured yet — send the user to the connect screen first.
             startActivity(Intent(this, ConnectActivity::class.java))
@@ -393,6 +392,7 @@ class MainActivity : AppCompatActivity() {
         // launches a flow, so re-entrant redirects can't burn the retry budget
         // without ever relaunching and suppress a legitimate later retry.
         if (!loginManager.start(this, origin, ::onSessionToken)) return
+        PushRegistrationManager(this).suspendForAuthentication()
         loginAttempts++
         // A re-login (session expired mid-use) bounces through the IdP again,
         // leaving a stopped off-origin entry + stale pre-expiry pages on the back
@@ -527,7 +527,6 @@ class MainActivity : AppCompatActivity() {
         // bridge is origin-allowlisted, so a server switch without re-registering
         // leaves the bridge dead for the new origin.
         val store = ServerStore(this)
-        notificationServerOf(intent)?.let(store::connect)
         val newServerUrl = store.currentServerUrl()
         val newOrigin = originOf(newServerUrl)
         if (newOrigin != null && newOrigin != pinnedOrigin) {
@@ -697,11 +696,6 @@ class MainActivity : AppCompatActivity() {
         intent
             ?.getStringExtra(NativeNotificationManager.EXTRA_NAVIGATE_PATH)
             ?.takeIf { it.startsWith("/") }
-
-    private fun notificationServerOf(intent: Intent?): String? =
-        intent
-            ?.getStringExtra(NativeNotificationManager.EXTRA_SERVER_URL)
-            ?.let(::normalizeServerUrl)
 
     private fun emitNotificationActivation(path: String?) {
         if (path == null) return

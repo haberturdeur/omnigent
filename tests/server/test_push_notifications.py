@@ -57,7 +57,14 @@ def test_subscription_round_trip_and_vapid_key_stability(tmp_path) -> None:
     assert store.list_for_users({"alice"}) == []
 
 
-def test_registration_api_uses_local_identity_without_auth() -> None:
+def test_registration_api_uses_local_identity_without_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "omnigent.server.push_notifications.socket.getaddrinfo",
+        lambda *args, **kwargs: [(2, 1, 6, "", ("93.184.216.34", 443))],
+    )
+
     class Store:
         def __init__(self) -> None:
             self.upserted: dict[str, str] = {}
@@ -107,11 +114,29 @@ def test_registration_api_uses_local_identity_without_auth() -> None:
     )
     assert invalid.status_code == 422
 
+    monkeypatch.setattr(
+        "omnigent.server.push_notifications.socket.getaddrinfo",
+        lambda *args, **kwargs: [(2, 1, 6, "", ("127.0.0.1", 443))],
+    )
+    private_endpoint = client.put(
+        "/v1/push/subscriptions/phone-1",
+        json={
+            "endpoint": "https://push.example.test/message/one",
+            "keys": {
+                "p256dh": base64.urlsafe_b64encode(b"\x04" + b"p" * 64).rstrip(b"=").decode(),
+                "auth": base64.urlsafe_b64encode(b"a" * 16).rstrip(b"=").decode(),
+            },
+        },
+    )
+    assert private_endpoint.status_code == 422
+    assert "public IP" in private_endpoint.json()["detail"]
+
 
 def test_dispatcher_sends_actionable_event_and_ignores_initial_idle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("OMNIGENT_WEBPUSH_VAPID_SUBJECT", raising=False)
+    monkeypatch.setenv("OMNIGENT_WEBPUSH_ALLOW_PRIVATE_ENDPOINTS", "true")
     delivered = threading.Event()
     payloads: list[dict[str, object]] = []
 
@@ -128,7 +153,7 @@ def test_dispatcher_sends_actionable_event_and_ignores_initial_idle(
 
     class Conversations:
         def get_conversation(self, conversation_id: str) -> object:
-            return SimpleNamespace(title="Build Android app")
+            return SimpleNamespace(title="Build Android app", parent_conversation_id=None)
 
     def send(**kwargs: object) -> None:
         assert kwargs["vapid_private_key"] == "private"
@@ -171,7 +196,8 @@ def test_dispatcher_sends_actionable_event_and_ignores_initial_idle(
                 "type": "response.elicitation_request",
                 "elicitation_id": "ask-1",
                 "params": {
-                    "message": "Codex wants to run **git status**",
+                    "message": "Codex needs approval",
+                    "content_preview": "Codex wants to run **git status**",
                     "requestedSchema": None,
                     "target_session_id": "session-child",
                     "remember_scope": {"tool": "Bash"},
@@ -200,5 +226,29 @@ def test_dispatcher_sends_actionable_event_and_ignores_initial_idle(
             "session_id": "session-1",
             "notification_id": "approval:ask-1",
         }
+    finally:
+        dispatcher.close()
+
+
+def test_dispatcher_suppresses_child_agent_conversations() -> None:
+    class Store:
+        def list_for_users(self, user_ids: set[str]) -> list[PushSubscription]:
+            raise AssertionError(f"child conversation unexpectedly had recipients: {user_ids}")
+
+    class Conversations:
+        def get_conversation(self, conversation_id: str) -> object:
+            return SimpleNamespace(
+                title="Background agent",
+                parent_conversation_id="parent-session",
+            )
+
+    dispatcher = PushNotificationDispatcher(
+        store=cast(Any, Store()),
+        conversation_store=cast(Any, Conversations()),
+        permission_store=None,
+        send=lambda **kwargs: pytest.fail(f"unexpected push: {kwargs}"),
+    )
+    try:
+        dispatcher._deliver("child-session", "session.needs_input")
     finally:
         dispatcher.close()

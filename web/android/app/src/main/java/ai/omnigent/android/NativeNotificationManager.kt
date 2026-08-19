@@ -14,7 +14,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * Local (foreground) notifications + best-effort badge, mirroring the iOS
  * `NativeNotificationManager`. Tap routing forwards the notification's
  * `navigatePath` back into the SPA: the tap launches [MainActivity] with the
- * path as an intent extra, which the activity replays via
+ * path as an intent extra through [NotificationRouterActivity], which replays it via
  * `window.__omnigentNativeEmitNotificationActivated`.
  *
  * Posting tolerates a missing `POST_NOTIFICATIONS` grant (requested by
@@ -140,7 +140,7 @@ class NativeNotificationManager(
                 approvalIntent(approval, ApprovalActionReceiver.ACTION_REJECT),
             )
         }
-        if (!post("session:${session.id}", EVENT_NOTIFICATION_ID, builder.build())) {
+        if (!post(notificationTag(session.id, exactId), EVENT_NOTIFICATION_ID, builder.build())) {
             releaseDelivery(deliveryKey, deliveryClaim)
         }
     }
@@ -209,7 +209,7 @@ class NativeNotificationManager(
         sessionId: String,
         notificationId: String?,
     ) {
-        manager.cancel("session:$sessionId", EVENT_NOTIFICATION_ID)
+        manager.cancel(notificationTag(sessionId, notificationId), EVENT_NOTIFICATION_ID)
         notificationId?.let { rememberDelivery("id:$it") }
         rememberDelivery("fallback:$sessionId:${SessionAttentionEvent.Kind.NEEDS_INPUT.name}")
     }
@@ -293,8 +293,7 @@ class NativeNotificationManager(
         serverUrl: String? = null,
     ): PendingIntent {
         val intent =
-            Intent(context, MainActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            Intent(context, NotificationRouterActivity::class.java).apply {
                 putExtra(EXTRA_NAVIGATE_PATH, navigatePath)
                 serverUrl?.let { putExtra(EXTRA_SERVER_URL, it) }
             }
@@ -343,4 +342,7 @@ class NativeNotificationManager(
         private const val EXACT_ID_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000L
         private val DELIVERY_LOCK = Any()
     }
+
+    private fun notificationTag(sessionId: String, notificationId: String?): String =
+        notificationId?.let { "notification:$it" } ?: "session:$sessionId"
 }

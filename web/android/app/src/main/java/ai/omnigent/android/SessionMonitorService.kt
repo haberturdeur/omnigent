@@ -203,6 +203,10 @@ class SessionMonitorService : Service() {
 
         fun start(context: android.content.Context) {
             SessionMonitorStore(context).enabled = true
+            startPreservingPreference(context)
+        }
+
+        fun startPreservingPreference(context: android.content.Context) {
             ContextCompat.startForegroundService(context, Intent(context, SessionMonitorService::class.java))
         }
 

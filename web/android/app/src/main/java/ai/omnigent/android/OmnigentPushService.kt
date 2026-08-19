@@ -11,7 +11,8 @@ import org.unifiedpush.android.connector.data.PushMessage
 class OmnigentPushService : PushService() {
     override fun onMessage(message: PushMessage, instance: String) {
         if (!message.decrypted) return
-        if (SessionMonitorStore(this).enabled) SessionMonitorService.stop(this)
+        val registration = PushRegistrationManager(this)
+        if (!registration.isEnabled(instance)) return
         runCatching {
             val payload = JSONObject(message.content.toString(Charsets.UTF_8))
             val type = payload.getString("type")
@@ -31,7 +32,6 @@ class OmnigentPushService : PushService() {
                     "session.failed" -> SessionAttentionEvent.Kind.FAILED
                     else -> return
                 }
-            val registration = PushRegistrationManager(this)
             val approval =
                 if (kind == SessionAttentionEvent.Kind.NEEDS_INPUT) {
                     payload.optJSONObject("approval")?.let { parseApproval(it, instance) }

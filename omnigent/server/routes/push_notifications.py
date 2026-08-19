@@ -6,11 +6,11 @@ import base64
 import binascii
 from typing import Annotated
 
-from fastapi import APIRouter, Path, Request, Response
+from fastapi import APIRouter, HTTPException, Path, Request, Response
 from pydantic import BaseModel, Field, HttpUrl, field_validator
 
 from omnigent.server.auth import RESERVED_USER_LOCAL, AuthProvider
-from omnigent.server.push_notifications import PushSubscriptionStore
+from omnigent.server.push_notifications import PushSubscriptionStore, validate_web_push_endpoint
 from omnigent.server.routes._auth_helpers import require_user
 
 
@@ -84,6 +84,10 @@ def create_push_notifications_router(
         body: PushSubscriptionRequest,
         request: Request,
     ) -> Response:
+        try:
+            validate_web_push_endpoint(str(body.endpoint))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         store.upsert(
             user_id=caller(request),
             device_id=device_id,

@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import ipaddress
 import json
 import logging
 import os
 import queue
+import socket
 import threading
 import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, cast
+from urllib.parse import urlsplit
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -92,7 +95,7 @@ def _notification_approval(
         "elicitation_id": elicitation_id,
         "session_id": target_session_id,
     }
-    message = params.get("message")
+    message = params.get("content_preview") or params.get("message")
     if isinstance(message, str) and message.strip():
         description = " ".join(message.replace("**", "").replace("`", "").split())
         approval["description"] = description[:512]
@@ -220,8 +223,29 @@ class PushSubscriptionStore:
                     created_at=int(time.time()),
                 )
                 session.add(row)
-                session.flush()
             return VapidKeys(row.private_key, row.public_key)
+
+
+def validate_web_push_endpoint(endpoint: str) -> None:
+    """Reject endpoints that could make Web Push delivery reach local services."""
+    if os.environ.get("OMNIGENT_WEBPUSH_ALLOW_PRIVATE_ENDPOINTS", "").lower() in {
+        "1",
+        "true",
+        "yes",
+    }:
+        return
+    host = urlsplit(endpoint).hostname
+    if not host:
+        raise ValueError("Web Push endpoint must have a hostname")
+    try:
+        addresses = {
+            ipaddress.ip_address(item[4][0])
+            for item in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+        }
+    except socket.gaierror as exc:
+        raise ValueError("Web Push endpoint hostname could not be resolved") from exc
+    if not addresses or any(not address.is_global for address in addresses):
+        raise ValueError("Web Push endpoint must resolve only to public IP addresses")
 
 
 class PushNotificationDispatcher:
@@ -350,6 +374,8 @@ class PushNotificationDispatcher:
         conversation = self._conversations.get_conversation(conversation_id)
         if conversation is None:
             return
+        if getattr(conversation, "parent_conversation_id", None) is not None:
+            return
         recipients = self._recipients(
             conversation_id,
             approvals_only=kind in {"session.needs_input", "notification.dismissed"},
@@ -373,7 +399,7 @@ class PushNotificationDispatcher:
                 "type": kind,
                 "session_id": conversation_id,
                 "notification_id": _notification_id(conversation_id, kind, event),
-                "title": conversation.title or "Omnigent session",
+                "title": (conversation.title or "Omnigent session")[:256],
             }
         if kind == "session.needs_input" and event is not None:
             approval = _notification_approval(event, conversation_id)
@@ -382,12 +408,22 @@ class PushNotificationDispatcher:
         payload = json.dumps(payload_data, separators=(",", ":"))
         keys = self._store.get_or_create_vapid_keys()
         sender = self._send
+        production_sender = sender is None
         if sender is None:
             from pywebpush import webpush
 
             sender = webpush
         for subscription in subscriptions:
+            requests_session = None
             try:
+                validate_web_push_endpoint(subscription.endpoint)
+                send_options: dict[str, Any] = {}
+                if production_sender:
+                    from requests import Session
+
+                    requests_session = Session()
+                    requests_session.max_redirects = 0
+                    send_options["requests_session"] = requests_session
                 sender(
                     subscription_info={
                         "endpoint": subscription.endpoint,
@@ -406,6 +442,7 @@ class PushNotificationDispatcher:
                     },
                     ttl=300,
                     timeout=10,
+                    **send_options,
                 )
             except Exception as exc:  # noqa: BLE001 - transport errors are isolated
                 response = getattr(exc, "response", None)
@@ -413,6 +450,9 @@ class PushNotificationDispatcher:
                     self._store.delete_endpoint(subscription.endpoint)
                 else:
                     _logger.warning("Web Push delivery failed: %s", exc)
+            finally:
+                if requests_session is not None:
+                    requests_session.close()
 
     def _recipients(self, conversation_id: str, *, approvals_only: bool) -> set[str]:
         if self._permissions is None:
