@@ -17,6 +17,7 @@
 
 import { getCachedServerInfo } from "./capabilities";
 import { getOmnigentHostConfig, hostFetch, isDatabricksWorkspace } from "./host";
+import { getActiveProfileUnlockToken } from "./profileUnlock";
 import {
   clearHostKeyless,
   getSessionHost,
@@ -403,46 +404,36 @@ async function _isWrongReplica(res: Response): Promise<boolean> {
   }
 }
 
-export async function authenticatedFetch(
-  input: RequestInfo | URL,
-  init?: RequestInit,
-): Promise<Response> {
-  const headers = new Headers(init?.headers);
+/** Add the browser identity and active private-profile bearer to headers. */
+export function addAuthenticationHeaders(headers: Headers): void {
+  const profileUnlock = getActiveProfileUnlockToken();
+  if (profileUnlock && !headers.has("X-Omnigent-Profile-Unlock")) {
+    headers.set("X-Omnigent-Profile-Unlock", profileUnlock);
+  }
   if (currentUserId && currentUserId !== RESERVED_USER_LOCAL && !headers.has("X-Forwarded-Email")) {
     headers.set("X-Forwarded-Email", currentUserId);
   }
-  // Pin host- and session-scoped requests to the replica holding that host's
-  // runner tunnel (key = host_id). Derived centrally so no call site has to
-  // thread it; a caller that set the header explicitly wins, and non-host-scoped
-  // requests get no key (any replica). Only against a Databricks workspace-hosted
-  // server — the embedded (managed) UI, or `npm run dev` pointed at a workspace URL.
-  // A standalone/self-hosted server has no Dicer, so the key would just dirty
-  // its logs (see isDatabricksWorkspace).
+}
+
+interface PreparedAuthenticatedRequest {
+  headers: Headers;
+  stampedSliceKey: boolean;
+  derivedHostId: string | null;
+}
+
+/** Build the same auth and replica-routing headers used by authenticatedFetch. */
+async function prepareAuthenticatedRequest(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Promise<PreparedAuthenticatedRequest> {
+  const headers = new Headers(init?.headers);
+  addAuthenticationHeaders(headers);
   const url = typeof input === "string" ? input : input.toString();
-  // Resolve this session's host BEFORE deriving the slice key below, so a fresh
-  // session sub-path request keys to the right replica on the first attempt
-  // instead of guessing the modal host and self-healing via the keyless retry.
-  // Null (the common case: warm map, non-session route, or standalone) means no
-  // bootstrap is needed — we skip the await so the fetch still dispatches in the
-  // same tick, exactly as before the gate.
   const hostResolve = beginSessionHostResolve(url);
   if (hostResolve !== null) await hostResolve;
-  // Whether WE (not the caller) stamped the slice key on this request; only then
-  // is a keyless re-address meaningful on a wrong-replica (wrong_replica) response.
   let stampedSliceKey = false;
-  // The host this request is FOR, even when we deliberately send it keyless
-  // (demoted). Lets the retry logic below demote/un-demote the right host.
   let derivedHostId: string | null = null;
   if (!headers.has(SLICE_KEY_HEADER) && isDatabricksWorkspace()) {
-    // Key by the request's OWN host when it's host-scoped; otherwise (a
-    // cross-host / DB-backed read) fall back to the modal host as a
-    // cache-affinity hint. The distinction matters: a host-scoped request whose
-    // host isn't known yet must send NO key rather than the modal — the modal
-    // is the wrong guess for a SPECIFIC session, so it would route to a replica
-    // that doesn't hold the tunnel; a keyless miss re-addresses instead. Only
-    // an unscoped route (list / updates) may ride the modal — a JSON create may
-    // not (see {@link isSessionCreate}): it is keyable ONLY by its own body
-    // host_id, so a managed sandbox create (no host_id yet) stays unkeyed.
     const scope = hostScopeForUrl(url);
     if (scope.scoped) {
       derivedHostId = scope.hostId;
@@ -451,17 +442,31 @@ export async function authenticatedFetch(
     } else {
       derivedHostId = modalHostId();
     }
-    // Skip keying a host we've already PROVEN routes keyless (its tunnels dialed
-    // in without a key → they live on the default replica). This spares the long
-    // tail of control paths (approve/stop/interrupt/…) from each needing a
-    // server-side wrong-replica guard: once demoted, every request for this host
-    // goes keyless from the start and reaches the tunnel first try. A demoted
-    // host that still returns wrong_replica keyless is un-demoted below.
     if (derivedHostId && !isHostKeyless(derivedHostId)) {
       headers.set(SLICE_KEY_HEADER, derivedHostId);
       stampedSliceKey = true;
     }
   }
+  return { headers, stampedSliceKey, derivedHostId };
+}
+
+/** Headers for a native transport that must match an authenticated API request. */
+export async function getAuthenticatedRequestHeaders(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Promise<Headers> {
+  return (await prepareAuthenticatedRequest(input, init)).headers;
+}
+
+export async function authenticatedFetch(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Promise<Response> {
+  const url = typeof input === "string" ? input : input.toString();
+  const { headers, stampedSliceKey, derivedHostId } = await prepareAuthenticatedRequest(
+    input,
+    init,
+  );
   // Bypass the browser HTTP cache for all API calls. Session
   // endpoints (GET /v1/sessions/{id}) carry volatile in-memory state
   // (pending_elicitations) that changes between fetches without any

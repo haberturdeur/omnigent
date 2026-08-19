@@ -1,9 +1,16 @@
-import { PanelLeftOpenIcon, PanelRightOpenIcon, SearchIcon, SettingsIcon } from "lucide-react";
+import {
+  PanelLeftOpenIcon,
+  PanelRightOpenIcon,
+  SearchIcon,
+  ServerIcon,
+  SettingsIcon,
+} from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Link } from "@/lib/routing";
 import { cn } from "@/lib/utils";
+import { isAndroidShell, openNativeServerSettings } from "@/lib/nativeBridge";
 
 /**
  * Search / Settings / sidebar-toggle cluster from the sidebar's header row.
@@ -57,6 +64,24 @@ export function SidebarHeaderActions({
   return (
     <div className="flex items-center gap-1" data-testid="sidebar-header-actions">
       <SidebarSearchButton onOpenSearch={onOpenSearch} />
+      {isAndroidShell() && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              aria-label="Server and app settings"
+              onClick={openNativeServerSettings}
+              className="size-6 text-muted-foreground hover:text-foreground"
+              data-testid="android-server-settings-button"
+            >
+              <ServerIcon className="ui-icon" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom">Server and app settings</TooltipContent>
+        </Tooltip>
+      )}
       <SidebarSettingsButton onSettingsClick={onSettingsClick} className="max-md:hidden" />
       <Tooltip>
         <TooltipTrigger asChild>

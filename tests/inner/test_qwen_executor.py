@@ -286,8 +286,9 @@ async def test_read_stdout_wakes_pending_futures_on_eof() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_sandbox_launch_path_bare_when_no_sandbox() -> None:
+def test_sandbox_launch_path_bare_when_no_sandbox(monkeypatch) -> None:
     """No os_env, or sandbox type 'none', spawns the bare qwen binary."""
+    monkeypatch.setattr("omnigent.inner.sandbox._profile_isolation_masks", lambda _cwd: [])
     from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
 
     # os_env not provided at all.

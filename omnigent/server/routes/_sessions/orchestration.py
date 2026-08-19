@@ -120,6 +120,14 @@ from omnigent.server.managed_hosts import (
     host_resume_supported,
     host_sandbox_is_running,
 )
+from omnigent.server.profile_protection import (
+    PROFILE_UNLOCK_HEADER,
+    get_profile_protection_by_id,
+    profile_is_accessible,
+    profile_membership_write,
+    protected_profile_for_workspace,
+    workspace_belongs_to_profile,
+)
 from omnigent.server.routes._auth_helpers import (
     attribution_user as _attribution_user,
 )
@@ -347,6 +355,7 @@ from omnigent.stores.conversation_store import (
 from omnigent.stores.file_store import FileStore
 from omnigent.stores.host_store import Host, HostStore, host_is_live
 from omnigent.stores.permission_store import PermissionStore
+from omnigent.stores.profile_store import ProfileStore
 from omnigent.stores.project_store import ProjectStore
 from omnigent.telemetry import emit as _tel_emit
 from omnigent.telemetry.events import NativeSessionUsageEvent as _TelNativeSessionUsageEvent
@@ -888,6 +897,7 @@ def _build_session_list_item(
         search_snippet=conv.search_snippet,
         parent_session_id=conv.parent_conversation_id,
         project_id=conv.project_id,
+        profile_id=conv.profile_id,
     )
 
 
@@ -1166,6 +1176,7 @@ def _build_session_response(
         # sessions whose forwarder stamps a turn id; ``None`` otherwise.
         active_response_id=_session_active_response_cache.get(conv.id),
         project_id=conv.project_id,
+        profile_id=conv.profile_id,
     )
 
 
@@ -7894,6 +7905,7 @@ async def _create_session_from_existing_agent(
     artifact_store: ArtifactStore | None = None,
     background_title_coordinator: BackgroundSessionTitleCoordinator | None = None,
     project_store: ProjectStore | None = None,
+    profile_store: ProfileStore | None = None,
 ) -> tuple[SessionResponse, tuple[dict[str, str], ...]]:
     """
     Create a session bound to an already-registered agent.
@@ -7942,6 +7954,57 @@ async def _create_session_from_existing_agent(
 
     _reject_reserved_cost_control_label_seed(body.labels)
     _reject_server_reserved_label_seed(body.labels)
+
+    profile_id = body.profile_id
+    if body.parent_session_id is not None:
+        parent_for_profile = await asyncio.to_thread(
+            conversation_store.get_conversation, body.parent_session_id
+        )
+        if parent_for_profile is not None:
+            if profile_id is not None and profile_id != parent_for_profile.profile_id:
+                raise OmnigentError(
+                    "A sub-agent must use its parent session's profile",
+                    code=ErrorCode.INVALID_INPUT,
+                )
+            profile_id = parent_for_profile.profile_id
+    elif profile_store is not None:
+        if profile_id is None:
+            default_profile = await asyncio.to_thread(
+                profile_store.ensure_default, user_id=user_id
+            )
+            profile_id = default_profile.id
+        elif await asyncio.to_thread(profile_store.get, profile_id, user_id=user_id) is None:
+            raise OmnigentError("Profile not found", code=ErrorCode.NOT_FOUND)
+
+    if body.workspace is not None:
+        workspace_owner = protected_profile_for_workspace(
+            body.workspace,
+            host_id=body.host_id,
+        )
+        if workspace_owner is not None and workspace_owner != profile_id:
+            raise OmnigentError(
+                "This workspace belongs to another private profile.",
+                code=ErrorCode.INVALID_INPUT,
+            )
+
+    if profile_id is not None and not profile_is_accessible(
+        profile_id, request.headers.get(PROFILE_UNLOCK_HEADER)
+    ):
+        raise OmnigentError("Profile not found", code=ErrorCode.NOT_FOUND)
+    if (
+        profile_id is not None
+        and get_profile_protection_by_id(profile_id) is not None
+        and body.workspace is not None
+        and not workspace_belongs_to_profile(
+            profile_id,
+            body.workspace,
+            host_id=body.host_id,
+        )
+    ):
+        raise OmnigentError(
+            "A private profile's workspace must be inside one of its protected roots.",
+            code=ErrorCode.INVALID_INPUT,
+        )
 
     agent = await validate_session_agent(
         user_id=user_id,
@@ -8326,19 +8389,21 @@ async def _create_session_from_existing_agent(
             )
 
     try:
-        conv = conversation_store.create_conversation(
-            agent_id=agent.id,
-            title=body.title,
-            parent_conversation_id=body.parent_session_id,
-            runner_id=inherited_runner_id,
-            kind="sub_agent" if body.parent_session_id else "default",
-            sub_agent_name=body.sub_agent_name,
-            host_id=body.host_id,
-            workspace=canonical_workspace,
-            git_branch=git_branch,
-            terminal_launch_args=validated_launch_args,
-            project_id=project_resolution.project_id,
-        )
+        with profile_membership_write((profile_id,) if profile_id is not None else ()):
+            conv = conversation_store.create_conversation(
+                agent_id=agent.id,
+                title=body.title,
+                parent_conversation_id=body.parent_session_id,
+                runner_id=inherited_runner_id,
+                kind="sub_agent" if body.parent_session_id else "default",
+                sub_agent_name=body.sub_agent_name,
+                host_id=body.host_id,
+                workspace=canonical_workspace,
+                git_branch=git_branch,
+                terminal_launch_args=validated_launch_args,
+                project_id=project_resolution.project_id,
+                profile_id=profile_id,
+            )
     except NameAlreadyExistsError as exc:
         if (
             created_worktree_path is not None

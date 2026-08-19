@@ -24,6 +24,10 @@ const {
   moveToProjectSpy,
   deleteProjectSpy,
   renameProjectSpy,
+  moveProjectProfileSpy,
+  moveSessionProfileSpy,
+  moveProjectFolderProfileSpy,
+  addProjectRootProfileSpy,
   createProjectSpy,
   fetchProjectSessionIdsMock,
   conversationsRef,
@@ -35,6 +39,10 @@ const {
   moveToProjectSpy: vi.fn(),
   deleteProjectSpy: vi.fn(),
   renameProjectSpy: vi.fn(),
+  moveProjectProfileSpy: vi.fn(),
+  moveSessionProfileSpy: vi.fn(),
+  moveProjectFolderProfileSpy: vi.fn(),
+  addProjectRootProfileSpy: vi.fn(),
   createProjectSpy: vi.fn(),
   // Stub for the exported fetchProjectSessionIds helper (kept so the module
   // mock stays complete). Remove-from-project no longer gates on a
@@ -136,13 +144,47 @@ vi.mock("@/hooks/useConversations", () => ({
     };
   },
   useMoveToProject: () => ({ mutate: moveToProjectSpy }),
+  useMoveSessionToProfile: () => ({
+    mutate: moveSessionProfileSpy,
+    isPending: false,
+    isError: false,
+  }),
   useDeleteProject: () => ({ mutate: deleteProjectSpy, isPending: false, isError: false }),
   useRenameProject: () => ({ mutate: renameProjectSpy, isPending: false, isError: false }),
+  useMoveProjectToProfile: () => ({
+    mutate: moveProjectProfileSpy,
+    isPending: false,
+    isError: false,
+  }),
+  useMoveProjectFolderToProfile: () => ({
+    mutate: moveProjectFolderProfileSpy,
+    isPending: false,
+    isError: false,
+  }),
+  useAddProjectRootToPrivateProfile: () => ({
+    mutate: addProjectRootProfileSpy,
+    isPending: false,
+    isError: false,
+  }),
   useCreateProject: () => ({ mutate: createProjectSpy, isPending: false, isError: false }),
   useProjectConfig: () => ({ data: undefined, isLoading: false }),
   useUpdateProjectConfig: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
   fetchProjectSessionIds: fetchProjectSessionIdsMock,
   PROJECT_LABEL_KEY: "omni_project",
+}));
+vi.mock("./ProfileSwitcher", () => ({ ProfileSwitcher: () => null }));
+vi.mock("@/lib/profilesApi", () => ({
+  useActiveProfile: () => ({
+    activeProfileId: "profile-personal",
+    profiles: [
+      { id: "profile-personal", name: "Personal", protection: {} },
+      { id: "profile-work", name: "Work", protection: {} },
+      { id: "profile-private", name: "Private", protection: { lock: "passcode" } },
+    ],
+  }),
+}));
+vi.mock("@/lib/profileUnlock", () => ({
+  getProfileUnlockToken: (id: string) => (id === "profile-private" ? "token" : null),
 }));
 // Header / dialog children that pull their own context — stub to keep the
 // test scoped to the conversation list + funnel.
@@ -272,6 +314,10 @@ beforeEach(() => {
   projectsMock.length = 0;
   moveToProjectSpy.mockReset();
   deleteProjectSpy.mockReset();
+  moveProjectProfileSpy.mockReset();
+  moveSessionProfileSpy.mockReset();
+  moveProjectFolderProfileSpy.mockReset();
+  addProjectRootProfileSpy.mockReset();
   fetchProjectSessionIdsMock.mockReset();
   fetchProjectSessionIdsMock.mockResolvedValue([]);
   projectSessionsMock.current = {};
@@ -1728,13 +1774,69 @@ describe("Sidebar project sections", () => {
     );
   });
 
+  it("moves a project and its sessions to another profile", async () => {
+    projectsMock.push("Customer X");
+    mockConversations([
+      conv("conv_filed", "Claude Code", { labels: { omni_project: "Customer X" } }),
+    ]);
+    renderSidebar();
+
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Project actions for Customer X" }), {
+      button: 0,
+    });
+    fireEvent.click(await screen.findByTestId("move-project"));
+    fireEvent.click(screen.getByRole("button", { name: /Work/ }));
+    fireEvent.click(screen.getByTestId("move-project-confirm"));
+
+    expect(moveProjectProfileSpy).toHaveBeenCalledWith(
+      { id: "p_Customer X", name: "Customer X", profileId: "profile-work" },
+      expect.anything(),
+    );
+  });
+
+  it("offers moving the project folder with the profile move", async () => {
+    projectsMock.push("Customer X");
+    mockConversations([
+      conv("conv_filed", "Claude Code", { labels: { omni_project: "Customer X" } }),
+    ]);
+    renderSidebar();
+
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Project actions for Customer X" }), {
+      button: 0,
+    });
+    fireEvent.click(await screen.findByTestId("move-project"));
+    fireEvent.click(screen.getByRole("button", { name: /Work/ }));
+    fireEvent.click(screen.getByTestId("move-project-folder-confirm"));
+
+    expect(moveProjectFolderProfileSpy).toHaveBeenCalledWith(
+      { id: "p_Customer X", name: "Customer X", profileId: "profile-work" },
+      expect.anything(),
+    );
+  });
+
+  it("can protect the existing project root for a private destination", async () => {
+    projectsMock.push("Customer X");
+    mockConversations([
+      conv("conv_filed", "Claude Code", { labels: { omni_project: "Customer X" } }),
+    ]);
+    renderSidebar();
+
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Project actions for Customer X" }), {
+      button: 0,
+    });
+    fireEvent.click(await screen.findByTestId("move-project"));
+    fireEvent.click(screen.getByRole("button", { name: /Private/ }));
+    fireEvent.click(screen.getByTestId("add-project-private-root-confirm"));
+
+    expect(addProjectRootProfileSpy).toHaveBeenCalledWith(
+      { id: "p_Customer X", name: "Customer X", profileId: "profile-private" },
+      expect.anything(),
+    );
+  });
+
   it("keeps New session in the project menu when the pencil requires hover", async () => {
     // The pencil is a redundant shortcut for the kebab's always-present "New
-    // session" item, so without a fine hover pointer it is genuinely absent
-    // (display:none via `hidden`), NOT sr-only — an sr-only pencil would stay
-    // focusable and announce a duplicate "New session" alongside the kebab's
-    // item. On hover+fine it is display-flex, revealed on hover/focus by the
-    // overlay's opacity. The kebab (not this pencil) carries the touch a11y path.
+    // session" item, so without a fine hover pointer it is genuinely absent.
     projectsMock.push("Customer X");
     mockConversations([
       conv("conv_filed", "Claude Code", { labels: { omni_project: "Customer X" } }),
@@ -2123,6 +2225,29 @@ describe("Sidebar move-to-project action", () => {
       expect(moveToProjectSpy).toHaveBeenCalledWith({ id: "conv_filed", project: "" }),
     );
     expect(screen.queryByText(/the project will be removed as well/i)).toBeNull();
+  });
+});
+
+describe("Sidebar move-session-to-profile action", () => {
+  it("moves a standalone session directly into another profile", async () => {
+    mockConversations([
+      conv("conv_move_profile", "Claude Code", { profile_id: "profile-personal" }),
+    ]);
+    renderSidebar();
+
+    const row = screen.getByRole("link", { name: /conv_move_profile/ }).closest("li")!;
+    fireEvent.pointerDown(within(row).getByRole("button", { name: "Conversation actions" }), {
+      button: 0,
+      ctrlKey: false,
+    });
+    fireEvent.click(await screen.findByTestId("move-session-to-profile"));
+    fireEvent.click(screen.getByRole("button", { name: /Work/ }));
+    fireEvent.click(screen.getByTestId("move-session-profile-confirm"));
+
+    expect(moveSessionProfileSpy).toHaveBeenCalledWith(
+      { id: "conv_move_profile", profileId: "profile-work" },
+      expect.anything(),
+    );
   });
 });
 

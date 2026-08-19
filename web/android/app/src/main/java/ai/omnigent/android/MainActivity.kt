@@ -6,11 +6,12 @@ import android.app.DownloadManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
-import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
@@ -20,15 +21,16 @@ import android.webkit.URLUtil
 import android.webkit.ValueCallback
 import android.webkit.WebView
 import android.widget.FrameLayout
-import android.widget.PopupMenu
+import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.widget.AppCompatButton
 import androidx.core.content.ContextCompat
 import androidx.core.content.getSystemService
 import androidx.core.graphics.Insets
-import androidx.core.view.MenuCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -46,11 +48,18 @@ import androidx.webkit.WebViewFeature
  * [ConnectActivity] first. Sidebar edge-swipe is intentionally absent (README).
  */
 class MainActivity : AppCompatActivity() {
+    private data class ServerSettingsAction(
+        val label: String,
+        val icon: Int,
+        val invoke: () -> Unit,
+    )
+
     private lateinit var webView: WebView
     private lateinit var notifications: NativeNotificationManager
     private lateinit var blobSaver: BlobSaver
     private val loginManager = OidcLoginManager()
     private var pinnedOrigin: String? = null
+    private var pinnedServerUrl: String? = null
 
     // Bridge-dependent work deferred until the page (and its injected emit
     // callbacks) exist — see onPageReady.
@@ -62,11 +71,6 @@ class MainActivity : AppCompatActivity() {
     private var loginAttempts = 0 // capped browser-login retries; reset in onPageReady
     private var historyCleared = false // drop pre-auth/login-redirect history once
 
-    // Floating server switcher — mirrors the iOS `ServerSwitcher`. Always
-    // visible so it's always available as a recovery path (backward compatible
-    // with older web builds). Theme-aware via brand colors (light/dark XML).
-    private lateinit var switchButton: View
-
     // WebChromeClient affordances that need Activity-scoped result launchers.
     // Transient by design: rotation is covered by configChanges (no recreation),
     // so the only loss is the process-death case (killed while the picker /
@@ -74,6 +78,8 @@ class MainActivity : AppCompatActivity() {
     // field and the fresh page simply has no pending input. No hang or crash.
     private var pendingFileCallback: ValueCallback<Array<Uri>>? = null
     private var pendingMicRequest: PermissionRequest? = null
+    private var startMonitorAfterPermission = false
+    private var enablePushAfterPermission = false
 
     private val requestNotifications =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -81,7 +87,13 @@ class MainActivity : AppCompatActivity() {
             // web layer keeps working without OS toasts. Granted: replay the
             // badge the web layer may have computed (and deduped) while the
             // permission dialog was still open — its post was silently dropped.
-            if (granted) notifications.replayBadge()
+            if (granted) {
+                notifications.replayBadge()
+                if (startMonitorAfterPermission) enablePollingFallback()
+                if (enablePushAfterPermission) enableUnifiedPush()
+            }
+            startMonitorAfterPermission = false
+            enablePushAfterPermission = false
         }
 
     private val requestMic =
@@ -119,6 +131,7 @@ class MainActivity : AppCompatActivity() {
         }
         val serverUrl = store.currentServerUrl()
         pinnedOrigin = originOf(serverUrl)
+        pinnedServerUrl = normalizeServerUrl(serverUrl)
 
         // Application context for the long-lived helpers so the WebView's bridge
         // reference chain can't pin this Activity.
@@ -130,61 +143,38 @@ class MainActivity : AppCompatActivity() {
 
         if (BuildConfig.DEBUG) WebView.setWebContentsDebuggingEnabled(true) // chrome://inspect
 
-        webView =
-            WebView(this).apply {
-                settings.javaScriptEnabled = true
-                settings.domStorageEnabled = true
-                settings.mediaPlaybackRequiresUserGesture = false
-
-                webViewClient =
-                    OmnigentWebViewClient(
-                        pinnedOrigin = { pinnedOrigin },
-                        shouldInjectBridgeAtPageReady = {
-                            bridgeTransportInstalled && bridgeScriptHandler == null
-                        },
-                        onPageReady = ::onPageReady,
-                        onLoginRequired = ::startLogin,
-                    )
-                webChromeClient =
-                    OmnigentWebChromeClient(
-                        onChooseFiles = ::chooseFiles,
-                        onPermission = ::handlePermissionRequest,
-                    )
-                setDownloadListener { downloadUrl, _, contentDisposition, mimeType, _ ->
-                    downloadFile(downloadUrl, contentDisposition, mimeType)
-                }
-            }
-        // Wrap the WebView in a FrameLayout so the floating server-switcher
-        // pill can sit on top of it. The pill uses the app's brand palette
-        // (values/values-night colors.xml) so it adapts to light/dark mode.
         val container = FrameLayout(this)
-        container.addView(webView)
-        val dp = resources.displayMetrics.density
-        switchButton =
-            TextView(this).apply {
-                text = hostLabelOf(serverUrl)
-                background =
-                    ContextCompat.getDrawable(this@MainActivity, R.drawable.bg_floating_switch)
-                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.brand_foreground))
-                textSize = 12f
-                setPadding((12 * dp).toInt(), (6 * dp).toInt(), (12 * dp).toInt(), (6 * dp).toInt())
-                elevation = 6 * dp
-                isClickable = true
-                isFocusable = true
-                setOnClickListener { showServerSwitcherMenu(it) }
-            }
-        switchButton.layoutParams =
-            FrameLayout
-                .LayoutParams(
-                    FrameLayout.LayoutParams.WRAP_CONTENT,
-                    FrameLayout.LayoutParams.WRAP_CONTENT,
-                    Gravity.TOP or Gravity.CENTER_HORIZONTAL,
-                ).apply {
-                    // Initial position below the status bar; corrected by the
-                    // insets listener once system bar insets are measured.
-                    topMargin = (8 * dp).toInt()
+        webView =
+            (if (PrivateInputWebView.isEnabled(this)) PrivateInputWebView(this) else WebView(this))
+                .apply {
+                    settings.javaScriptEnabled = true
+                    settings.domStorageEnabled = true
+                    settings.mediaPlaybackRequiresUserGesture = false
+
+                    webViewClient =
+                        OmnigentWebViewClient(
+                            pinnedOrigin = { pinnedOrigin },
+                            pinnedServerUrl = { pinnedServerUrl },
+                            shouldInjectBridgeAtPageReady = {
+                                bridgeTransportInstalled && bridgeScriptHandler == null
+                            },
+                            onPageReady = ::onPageReady,
+                            onLoginRequired = ::startLogin,
+                            onMainFrameError = { showServerRecovery(container) },
+                            bridgeScriptSource = { NativeBridgeScript.sourceFor(pinnedServerUrl) },
+                        )
+                    webChromeClient =
+                        OmnigentWebChromeClient(
+                            onChooseFiles = ::chooseFiles,
+                            onPermission = ::handlePermissionRequest,
+                        )
+                    setDownloadListener { downloadUrl, _, contentDisposition, mimeType, _ ->
+                        downloadFile(downloadUrl, contentDisposition, mimeType)
+                    }
                 }
-        container.addView(switchButton)
+        // Keep the WebView in a margin-capable parent for IME resizing. Server
+        // controls live in the web Settings page and no longer overlay chat.
+        container.addView(webView)
         setContentView(container)
         applySystemBarContrast()
         installBridge()
@@ -222,12 +212,6 @@ class MainActivity : AppCompatActivity() {
             // keyboard covers the nav bar). Top/left/right are IME-independent.
             val bottom = if (ime.bottom > 0) 0 else bars.bottom
             lastInsets = Insets.of(bars.left, bars.top, bars.right, bottom)
-            // Push the floating switch button below the status bar so it doesn't
-            // disappear under the notch/status icons on edge-to-edge layouts.
-            (switchButton.layoutParams as? FrameLayout.LayoutParams)?.let { lp ->
-                lp.topMargin = bars.top + (8 * dp).toInt()
-                switchButton.layoutParams = lp
-            }
             emitInsets()
             insets
         }
@@ -276,13 +260,32 @@ class MainActivity : AppCompatActivity() {
             },
         )
 
+        if (SessionMonitorStore(this).enabled && PushRegistrationManager(this).registered) {
+            SessionMonitorService.stop(this)
+        } else if (SessionMonitorStore(this).enabled) {
+            if (canPostNotifications()) {
+                SessionMonitorService.start(this)
+            } else {
+                startMonitorAfterPermission = true
+            }
+        }
         ensureNotificationPermission()
         webView.loadUrl(serverUrl)
     }
 
+    override fun onStart() {
+        super.onStart()
+        SessionMonitorStore.appVisible = true
+    }
+
+    override fun onStop() {
+        SessionMonitorStore.appVisible = false
+        super.onStop()
+    }
+
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        applySystemBarContrast()
+        applySystemBarContrast(newConfig)
         if (::webView.isInitialized) {
             // Notify matchMedia listeners without reloading the SPA.
             webView.dispatchConfigurationChanged(newConfig)
@@ -308,6 +311,9 @@ class MainActivity : AppCompatActivity() {
                 OmnigentBridgeListener(
                     notifications = notifications,
                     blobSaver = blobSaver,
+                    profileBiometrics = ProfileBiometricStore(this),
+                    onOpenServerSettings = { showServerSwitcherMenu(webView) },
+                    serverBaseUrl = { pinnedServerUrl },
                 ),
             )
         } catch (_: IllegalArgumentException) {
@@ -320,7 +326,7 @@ class MainActivity : AppCompatActivity() {
                 bridgeScriptHandler =
                     WebViewCompat.addDocumentStartJavaScript(
                         webView,
-                        NativeBridgeScript.source,
+                        NativeBridgeScript.sourceFor(pinnedServerUrl),
                         setOf(origin),
                     )
             } catch (_: IllegalArgumentException) {
@@ -329,9 +335,9 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun applySystemBarContrast() {
+    private fun applySystemBarContrast(configuration: Configuration = resources.configuration) {
         val isLightMode =
-            resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK !=
+            configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK !=
                 Configuration.UI_MODE_NIGHT_YES
         WindowInsetsControllerCompat(window, window.decorView).apply {
             isAppearanceLightStatusBars = isLightMode
@@ -352,7 +358,7 @@ class MainActivity : AppCompatActivity() {
      * login redirect).
      */
     private fun startLogin() {
-        val origin = pinnedOrigin ?: return
+        val serverUrl = pinnedServerUrl ?: return
         if (loginAttempts >= MAX_LOGIN_ATTEMPTS) {
             authLog("login attempts exhausted ($loginAttempts) — not retrying")
             return
@@ -362,7 +368,8 @@ class MainActivity : AppCompatActivity() {
         // Count (and re-arm the history clear for) only a call that actually
         // launches a flow, so re-entrant redirects can't burn the retry budget
         // without ever relaunching and suppress a legitimate later retry.
-        if (!loginManager.start(this, origin, ::onSessionToken)) return
+        if (!loginManager.start(this, serverUrl, ::onSessionToken)) return
+        PushRegistrationManager(this).suspendForAuthentication()
         loginAttempts++
         // A re-login (session expired mid-use) bounces through the IdP again,
         // leaving a stopped off-origin entry + stale pre-expiry pages on the back
@@ -423,7 +430,7 @@ class MainActivity : AppCompatActivity() {
             // budget on a failure that retrying can't fix. Stay put instead.
             if (!accepted) return@setCookie
             cookies.flush()
-            webView.loadUrl(origin)
+            webView.loadUrl(pinnedServerUrl ?: origin)
         }
         startActivity(
             Intent(this, MainActivity::class.java)
@@ -499,7 +506,7 @@ class MainActivity : AppCompatActivity() {
         val store = ServerStore(this)
         val newServerUrl = store.currentServerUrl()
         val newOrigin = originOf(newServerUrl)
-        if (newOrigin != null && newOrigin != pinnedOrigin) {
+        if (newOrigin != null && normalizeServerUrl(newServerUrl) != pinnedServerUrl) {
             reloadWithNewServer(newServerUrl, newOrigin)
         }
 
@@ -526,10 +533,10 @@ class MainActivity : AppCompatActivity() {
         loginManager.cancel()
         removeBridge()
         pinnedOrigin = newOrigin
+        pinnedServerUrl = normalizeServerUrl(serverUrl)
         pageLoaded = false
         historyCleared = false
         loginAttempts = 0
-        (switchButton as? TextView)?.text = hostLabelOf(serverUrl)
         installBridge()
         webView.loadUrl(serverUrl)
     }
@@ -549,55 +556,143 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Show the server-switcher dropdown menu, mirroring the iOS `ServerSwitcher`
-     * `Menu`. Lists the current server (disabled header), the other servers on
-     * offer (organization presets, then recents), Reload, and Connect to New
-     * Server. Tapping a server switches directly without leaving the app;
-     * "Connect to New Server" opens [ConnectActivity] for manual URL entry.
+     * Show server and app actions in a native dialog. A popup cannot use the
+     * full-screen WebView as an anchor: its bounds leave no reliable place for
+     * Android to position the dropdown.
      */
-    private fun showServerSwitcherMenu(anchor: View) {
+    private fun showServerSwitcherMenu(
+        @Suppress("UNUSED_PARAMETER") anchor: View,
+    ) {
         val store = ServerStore(this)
         val currentUrl = store.currentServerUrl()
-        val otherServers = store.offeredServers().filter { originOf(it) != pinnedOrigin }
-
-        val popup = PopupMenu(this, anchor, Gravity.TOP)
-        MenuCompat.setGroupDividerEnabled(popup.menu, true)
-        popup.menu.apply {
-            // Group 0: current server — disabled header.
-            add(0, 0, 0, hostLabelOf(currentUrl)).isEnabled = false
-            // Group 1: the other servers on offer (divider before this group).
-            otherServers.forEachIndexed { i, url ->
-                add(1, 100 + i, 0, hostLabelOf(url))
+        val otherServers =
+            store.offeredServers().filter { normalizeServerUrl(it) != pinnedServerUrl }
+        val actions =
+            buildList {
+                otherServers.forEach { url ->
+                    add(
+                        ServerSettingsAction(
+                            label = hostLabelOf(url),
+                            icon = R.drawable.ic_server,
+                            invoke = {
+                                store.connect(url)
+                                originOf(url)?.let { reloadWithNewServer(url, it) }
+                            },
+                        ),
+                    )
+                }
+                add(
+                    ServerSettingsAction(
+                        getString(R.string.menu_reload),
+                        R.drawable.ic_reload,
+                        webView::reload,
+                    ),
+                )
+                add(
+                    ServerSettingsAction(
+                        getString(R.string.menu_connect_new),
+                        R.drawable.ic_server,
+                        {
+                            startActivity(Intent(this@MainActivity, ConnectActivity::class.java))
+                        },
+                    ),
+                )
+                add(
+                    ServerSettingsAction(
+                        getString(
+                            if (PushRegistrationManager(this@MainActivity).enabled) {
+                                R.string.menu_disable_push
+                            } else {
+                                R.string.menu_enable_push
+                            },
+                        ),
+                        R.drawable.ic_notifications,
+                        ::toggleUnifiedPush,
+                    ),
+                )
+                add(
+                    ServerSettingsAction(
+                        getString(
+                            if (SessionMonitorStore(this@MainActivity).enabled) {
+                                R.string.menu_disable_monitor
+                            } else {
+                                R.string.menu_enable_monitor
+                            },
+                        ),
+                        R.drawable.ic_polling,
+                        ::toggleSessionMonitor,
+                    ),
+                )
+                add(
+                    ServerSettingsAction(
+                        getString(
+                            if (PrivateInputWebView.isEnabled(this@MainActivity)) {
+                                R.string.menu_disable_private_keyboard
+                            } else {
+                                R.string.menu_enable_private_keyboard
+                            },
+                        ),
+                        R.drawable.ic_keyboard,
+                        {
+                            PrivateInputWebView.setEnabled(
+                                this@MainActivity,
+                                !PrivateInputWebView.isEnabled(this@MainActivity),
+                            )
+                            recreate()
+                        },
+                    ),
+                )
             }
-            // Group 2: actions (divider before this group).
-            add(2, 3, 0, getString(R.string.menu_reload))
-            add(2, 4, 0, getString(R.string.menu_connect_new))
-        }
-        popup.setOnMenuItemClickListener { item ->
-            when (item.itemId) {
-                3 -> {
-                    webView.reload()
-                    true
-                }
 
-                4 -> {
-                    startActivity(Intent(this@MainActivity, ConnectActivity::class.java))
-                    true
-                }
-
-                in 100..Int.MAX_VALUE -> {
-                    val url = otherServers[item.itemId - 100]
-                    store.connect(url)
-                    originOf(url)?.let { reloadWithNewServer(url, it) }
-                    true
-                }
-
-                else -> {
-                    false
-                }
+        val content = layoutInflater.inflate(R.layout.dialog_server_settings, null)
+        content.findViewById<TextView>(R.id.connected_server_host).text = hostLabelOf(currentUrl)
+        val actionContainer =
+            content.findViewById<LinearLayout>(R.id.server_settings_actions)
+        val dialog =
+            android.app.AlertDialog
+                .Builder(this)
+                .setView(content)
+                .create()
+        actions.forEach { action ->
+            val row =
+                layoutInflater.inflate(
+                    R.layout.item_server_settings_action,
+                    actionContainer,
+                    false,
+                )
+            row.findViewById<ImageView>(R.id.server_action_icon).setImageResource(action.icon)
+            row.findViewById<TextView>(R.id.server_action_label).text = action.label
+            row.setOnClickListener {
+                dialog.dismiss()
+                action.invoke()
             }
+            actionContainer.addView(row)
         }
-        popup.show()
+        content.findViewById<View>(R.id.server_settings_close).setOnClickListener {
+            dialog.dismiss()
+        }
+        dialog.setOnShowListener {
+            dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        }
+        dialog.show()
+    }
+
+    private fun showServerRecovery(container: FrameLayout) {
+        if (container.findViewWithTag<View>(SERVER_RECOVERY_TAG) != null) return
+        val button =
+            AppCompatButton(this).apply {
+                tag = SERVER_RECOVERY_TAG
+                text = getString(R.string.server_settings_title)
+                setOnClickListener { showServerSwitcherMenu(this) }
+            }
+        container.addView(
+            button,
+            FrameLayout
+                .LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ).apply { gravity = android.view.Gravity.CENTER },
+        )
     }
 
     /** Run bridge-dependent work once a pinned-origin page has finished loading. */
@@ -605,7 +700,10 @@ class MainActivity : AppCompatActivity() {
         // Only a real pinned-origin load carries the injected facade — an error
         // page (chrome-error://) or a foreign redirect must NOT drain
         // pendingNavigatePath or push insets into a page that can't consume them.
-        if (originOf(url) != pinnedOrigin) return
+        if (!isWithinServerBase(url, pinnedServerUrl)) return
+        findViewById<ViewGroup>(android.R.id.content)
+            .findViewWithTag<View>(SERVER_RECOVERY_TAG)
+            ?.let { (it.parent as? ViewGroup)?.removeView(it) }
         // First authenticated app page: drop everything before it from the
         // back/forward list — the pre-auth root, any IdP pages, and the post-login
         // reload all bounce to login or show a blank if Back reaches them. After
@@ -618,6 +716,9 @@ class MainActivity : AppCompatActivity() {
         loginAttempts = 0 // reached a pinned-origin page — we're past the login redirect
         flushPendingActivation()
         emitInsets()
+        if (PushRegistrationManager(this).enabled) {
+            PushRegistrationManager(this).uploadStoredEndpoint()
+        }
     }
 
     private fun flushPendingActivation() {
@@ -625,7 +726,7 @@ class MainActivity : AppCompatActivity() {
         // e.g. mid re-login — where the bridge facade doesn't exist, so emitting
         // would silently drop the path. Keep it pending; the next pinned-origin
         // onPageReady flushes it.
-        if (originOf(webView.url) != pinnedOrigin) return
+        if (!isWithinServerBase(webView.url, pinnedServerUrl)) return
         emitNotificationActivation(pendingNavigatePath)
         pendingNavigatePath = null
     }
@@ -682,6 +783,47 @@ class MainActivity : AppCompatActivity() {
 
     private fun hasPermission(permission: String): Boolean =
         ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
+
+    private fun canPostNotifications(): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            hasPermission(Manifest.permission.POST_NOTIFICATIONS)
+
+    private fun toggleSessionMonitor() {
+        if (SessionMonitorStore(this).enabled) {
+            SessionMonitorService.stop(this)
+            return
+        }
+        if (canPostNotifications()) {
+            enablePollingFallback()
+        } else {
+            startMonitorAfterPermission = true
+            ensureNotificationPermission()
+        }
+    }
+
+    private fun toggleUnifiedPush() {
+        val registration = PushRegistrationManager(this)
+        if (registration.enabled) {
+            registration.disable()
+            return
+        }
+        if (canPostNotifications()) {
+            enableUnifiedPush()
+        } else {
+            enablePushAfterPermission = true
+            ensureNotificationPermission()
+        }
+    }
+
+    private fun enableUnifiedPush() {
+        PushRegistrationManager(this).enable(this)
+    }
+
+    private fun enablePollingFallback() {
+        val registration = PushRegistrationManager(this)
+        if (registration.enabled) registration.disable()
+        SessionMonitorService.start(this)
+    }
 
     private fun ensureNotificationPermission() {
         // Notification permission is granted at install time below API 33.
@@ -785,6 +927,7 @@ class MainActivity : AppCompatActivity() {
 
     private companion object {
         const val MAX_LOGIN_ATTEMPTS = 3
+        const val SERVER_RECOVERY_TAG = "omnigent-server-recovery"
 
         // Back-press fallback: long enough that a healthy renderer's JS round-trip
         // (a few ms) always wins the race, short enough to not feel stuck if it

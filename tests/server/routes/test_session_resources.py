@@ -2922,6 +2922,66 @@ async def test_filesystem_read_proxies_to_runner(
 
 
 @pytest.mark.asyncio
+async def test_filesystem_download_returns_raw_complete_file(
+    client: httpx.AsyncClient,
+) -> None:
+    """The download endpoint returns bytes and requests bounded full content."""
+    import base64
+
+    raw = b"\x89APK\x00\xff"
+    fake_runner = _FakeRunnerClient(
+        payload={
+            "object": "session.environment.filesystem.file_content",
+            "path": "build/app.apk",
+            "content_type": "application/vnd.android.package-archive",
+            "encoding": "base64",
+            "content": base64.b64encode(raw).decode(),
+            "bytes": len(raw),
+            "truncated": False,
+        }
+    )
+    set_runner_router(_FakeRunnerRouter(fake_runner))  # type: ignore[arg-type]
+
+    resp = await client.get(
+        "/v1/sessions/79b22ebd2309e48fdeb450c65611d51b/resources/environments"
+        "/default/filesystem-download/build/app.apk"
+    )
+
+    assert resp.status_code == 200
+    assert resp.content == raw
+    assert resp.headers["content-disposition"] == (
+        "attachment; filename=\"app.apk\"; filename*=UTF-8''app.apk"
+    )
+    assert fake_runner.get_params == [{"max_bytes": str(64 * 1024 * 1024), "download": "true"}]
+
+
+@pytest.mark.asyncio
+async def test_filesystem_download_refuses_truncated_file(
+    client: httpx.AsyncClient,
+) -> None:
+    """Oversized downloads fail explicitly instead of saving corrupt content."""
+    fake_runner = _FakeRunnerClient(
+        payload={
+            "object": "session.environment.filesystem.file_content",
+            "path": "huge.bin",
+            "content_type": "application/octet-stream",
+            "encoding": "base64",
+            "content": "",
+            "bytes": 64 * 1024 * 1024,
+            "truncated": True,
+        }
+    )
+    set_runner_router(_FakeRunnerRouter(fake_runner))  # type: ignore[arg-type]
+
+    resp = await client.get(
+        "/v1/sessions/79b22ebd2309e48fdeb450c65611d51b/resources/environments"
+        "/default/filesystem-download/huge.bin"
+    )
+
+    assert resp.status_code == 413
+
+
+@pytest.mark.asyncio
 async def test_filesystem_write_proxies_to_runner(
     client: httpx.AsyncClient,
 ) -> None:

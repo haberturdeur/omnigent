@@ -65,7 +65,10 @@ class ManagedConfigTest {
     fun `unparseable entries are dropped without losing the rest`() {
         assertEquals(
             listOf("https://good.example.com"),
-            configOf("ftp://nope.example.com,https://good.example.com,https://").serverUrls,
+            configOf(
+                "ftp://nope.example.com,http://cleartext.example.com," +
+                    "https://good.example.com,https://",
+            ).serverUrls,
         )
     }
 

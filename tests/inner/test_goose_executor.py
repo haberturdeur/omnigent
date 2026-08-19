@@ -1110,7 +1110,8 @@ async def test_ensure_session_raises_on_missing_session_id() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_sandbox_launch_path_bare_when_no_sandbox() -> None:
+def test_sandbox_launch_path_bare_when_no_sandbox(monkeypatch) -> None:
+    monkeypatch.setattr("omnigent.inner.sandbox._profile_isolation_masks", lambda _cwd: [])
     from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
 
     # os_env=None → bare binary.

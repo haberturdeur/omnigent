@@ -2037,6 +2037,28 @@ describe("Composer config gear", () => {
     expect(screen.getByTestId("composer-config-effort")).toBeTruthy();
   });
 
+  it("changes the running Codex approval preset from the config modal", async () => {
+    const setCodexApprovalMode = vi.fn().mockResolvedValue(undefined);
+    useChatStore.setState({ codexApprovalMode: "default", setCodexApprovalMode });
+    renderWithTooltips(
+      <Composer
+        {...composerProps({
+          showModels: true,
+          modelPickerKind: "codex",
+          codexModelOptions: [{ id: "gpt-5.4", displayName: "GPT-5.4", isDefault: true }],
+        })}
+      />,
+    );
+
+    fireEvent.click(gear()!);
+    await screen.findByTestId("composer-config-modal");
+    fireEvent.click(screen.getByTestId("composer-config-approval"));
+    fireEvent.click(screen.getByRole("option", { name: "Read only" }));
+    fireEvent.click(screen.getByTestId("composer-config-save"));
+
+    await waitFor(() => expect(setCodexApprovalMode).toHaveBeenCalledWith("read-only"));
+  });
+
   it("uses the Default sentinel when Kiro marks no catalog row as default", async () => {
     const options = [
       { id: "auto", displayName: "Automatic", isDefault: false },

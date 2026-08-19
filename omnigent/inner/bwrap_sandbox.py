@@ -426,13 +426,17 @@ class BwrapSandboxBackend(SandboxBackend):
         cwd_resolved = cwd.resolve(strict=False)
         chdir_target = chdir.resolve(strict=False) if chdir is not None else cwd_resolved
         bwrap_args: list[str] = ["bwrap"]
+        host_access = any(_is_same_path(root, Path("/")) for root in policy.write_roots)
 
-        for path in _DEFAULT_RO_DIRS:
-            bwrap_args += ["--ro-bind-try", path, path]
-        for path in _DEFAULT_ETC_FILES:
-            bwrap_args += ["--ro-bind-try", path, path]
-        for path in _DEFAULT_ETC_DIRS:
-            bwrap_args += ["--ro-bind-try", path, path]
+        if host_access:
+            bwrap_args += ["--bind", "/", "/"]
+        else:
+            for path in _DEFAULT_RO_DIRS:
+                bwrap_args += ["--ro-bind-try", path, path]
+            for path in _DEFAULT_ETC_FILES:
+                bwrap_args += ["--ro-bind-try", path, path]
+            for path in _DEFAULT_ETC_DIRS:
+                bwrap_args += ["--ro-bind-try", path, path]
 
         # /proc, /dev (filtered by bwrap to a safe minimal device set),
         # and a private /tmp so the agent's writes there don't pollute
@@ -448,17 +452,15 @@ class BwrapSandboxBackend(SandboxBackend):
             bwrap_args += ["--bind", "/proc", "/proc"]
         else:
             bwrap_args += ["--proc", "/proc"]
-        bwrap_args += [
-            "--dev",
-            "/dev",
-            "--tmpfs",
-            "/tmp",
-        ]
+        bwrap_args += ["--dev", "/dev"]
+        if not host_access:
+            bwrap_args += ["--tmpfs", "/tmp"]
 
         # Make sure argv[0] (the helper interpreter) is reachable inside
         # the sandbox even when it lives outside the default mounts —
         # e.g. a pyenv install under ``$HOME/.pyenv``.
-        bwrap_args += _ensure_executable_visible(argv, cwd_resolved)
+        if not host_access:
+            bwrap_args += _ensure_executable_visible(argv, cwd_resolved)
 
         # Make sure the final target binary (e.g. the claude CLI at
         # node_modules/.bin/claude) is also reachable.  The launcher
@@ -466,21 +468,22 @@ class BwrapSandboxBackend(SandboxBackend):
         # target via subprocess.run — without this bind the target's
         # directory is invisible inside the namespace and the exec
         # fails with FileNotFoundError.
-        if target is not None:
+        if target is not None and not host_access:
             bwrap_args += _ensure_executable_visible([target], cwd_resolved)
 
         # cwd bind: writable iff a write_root resolves to cwd.
-        cwd_writable = any(_is_same_path(root, cwd_resolved) for root in policy.write_roots)
-        bwrap_args += [
-            "--bind" if cwd_writable else "--ro-bind",
-            str(cwd_resolved),
-            str(cwd_resolved),
-        ]
+        if not host_access:
+            cwd_writable = any(_is_same_path(root, cwd_resolved) for root in policy.write_roots)
+            bwrap_args += [
+                "--bind" if cwd_writable else "--ro-bind",
+                str(cwd_resolved),
+                str(cwd_resolved),
+            ]
 
         # Additional write roots — typically the per-helper scratch
         # tmpdir. We skip cwd here because it was bound above.
         for root in policy.write_roots:
-            if _is_same_path(root, cwd_resolved):
+            if _is_same_path(root, cwd_resolved) or _is_same_path(root, Path("/")):
                 continue
             bwrap_args += ["--bind-try", str(root), str(root)]
 
@@ -528,8 +531,8 @@ class BwrapSandboxBackend(SandboxBackend):
         # binds come AFTER the mask so they win right back, scoped to
         # exactly the interpreter subtree.
         masked_dirs = _tmpfs_mask_dirs(mask_args)
-        reexpose = _interpreter_reexpose_after_mask(argv, masked_dirs)
-        if target is not None:
+        reexpose = [] if host_access else _interpreter_reexpose_after_mask(argv, masked_dirs)
+        if target is not None and not host_access:
             reexpose += _interpreter_reexpose_after_mask([target], masked_dirs)
         seen_reexpose: set[tuple[str, str]] = set()
         for i in range(0, len(reexpose) - 2, 3):
@@ -1193,16 +1196,21 @@ def _dotfile_and_symlink_mask_args(
     :raises OSError: When the entry cap is reached and the policy's
         overflow mode is ``"error"``.
     """
+    host_access = any(_is_same_path(root, Path("/")) for root in policy.write_roots)
     safe_roots = _bwrap_safe_roots(cwd, policy, argv=argv)
     seen_mask_paths: set[str] = set()
-    entries = scan_cwd_mask_entries(
-        cwd,
-        allow_hidden=allow_hidden,
-        safe_roots=safe_roots,
-        max_entries=policy.cwd_hidden_scan_max_entries,
-        overflow=policy.cwd_hidden_scan_overflow,
-        recursive=policy.cwd_hidden_scan_recursive,
-        logger_name=__name__,
+    entries = (
+        []
+        if host_access
+        else scan_cwd_mask_entries(
+            cwd,
+            allow_hidden=allow_hidden,
+            safe_roots=safe_roots,
+            max_entries=policy.cwd_hidden_scan_max_entries,
+            overflow=policy.cwd_hidden_scan_overflow,
+            recursive=policy.cwd_hidden_scan_recursive,
+            logger_name=__name__,
+        )
     )
     for entry in entries:
         seen_mask_paths.add(str(entry.path))
@@ -1211,13 +1219,18 @@ def _dotfile_and_symlink_mask_args(
     # grant lists into one deduplicated, ancestor-first set (dropping
     # roots under cwd and roots nested under another kept root) so an
     # overlapping or doubly-granted path is walked once, not per-lever.
-    for root in merge_scan_roots(
-        cwd,
-        policy.read_roots,
-        policy.write_roots,
-        recursive=policy.cwd_hidden_scan_recursive,
-        skip_roots=policy.mask_scan_skip_roots,
-    ):
+    scan_roots = (
+        []
+        if host_access
+        else merge_scan_roots(
+            cwd,
+            policy.read_roots,
+            policy.write_roots,
+            recursive=policy.cwd_hidden_scan_recursive,
+            skip_roots=policy.mask_scan_skip_roots,
+        )
+    )
+    for root in scan_roots:
         try:
             extra = scan_cwd_mask_entries(
                 root,
@@ -1251,6 +1264,7 @@ def _dotfile_and_symlink_mask_args(
     # path is dropped by the re-stat below. ``is_dir`` follows symlinks
     # (unlike the walker's ``follow_symlinks=False``), so a symlink to a
     # directory tmpfs-masks at the link location.
+    explicit_mask_paths = {str(path) for path in policy.mask_paths or []}
     for mask_path in policy.mask_paths or []:
         key = str(mask_path)
         if key in seen_mask_paths:
@@ -1267,15 +1281,14 @@ def _dotfile_and_symlink_mask_args(
         # target is safe — persistent host dotfiles still exist and are
         # still masked.
         if not _path_exists_lstat(entry.path):
+            if str(entry.path) in explicit_mask_paths:
+                raise OSError(f"explicit mask path disappeared: {entry.path}")
             continue
-        # Symlinks are skipped: bwrap resolves a mount destination through
-        # the final symlink, so both mask shapes abort the whole namespace
-        # ("Can't create file at <link>" / "Can't mount tmpfs on <link>")
-        # and kill the launcher at spawn. Skipping is safe because the mount
-        # namespace already confines symlink resolution — the link is
-        # followed inside the sandbox view, where an escaping target is
-        # either unmounted or independently masked.
+        # bwrap cannot mount over a final symlink. Scanned transient links may
+        # be skipped, but an explicit mask must fail closed if it becomes one.
         if entry.path.is_symlink():
+            if str(entry.path) in explicit_mask_paths:
+                raise OSError(f"explicit mask path became a symlink: {entry.path}")
             continue
         if entry.kind == "dir":
             args.extend(["--tmpfs", str(entry.path)])

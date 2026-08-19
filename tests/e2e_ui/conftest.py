@@ -982,6 +982,7 @@ def live_server(
         **os.environ,
         "OMNIGENT_RUNNER_TUNNEL_TOKEN": binding_token,
         "OMNIGENT_BUILTIN_AGENT_DIRS": os.pathsep.join(builtin_dirs),
+        "OMNIGENT_PROFILE_PROTECTION_PATH": str(db_path.with_name("profile-protection.json")),
         # Point the openai-agents harness at the mock LLM server so no
         # real provider credentials are needed.
         "OPENAI_BASE_URL": f"{mock_url}/v1",

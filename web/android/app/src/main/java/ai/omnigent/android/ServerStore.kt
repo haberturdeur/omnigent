@@ -26,7 +26,7 @@ class ServerStore(
     fun hasServer(): Boolean = !storedServerUrl().isNullOrBlank()
 
     /**
-     * The current server, or the emulator-loopback debug default if unset. A bare
+     * The current server, or the TLS emulator-loopback debug default if unset. A bare
      * Databricks workspace root resolves to its `/omnigent` mount so the shell
      * lands on the app instead of the workspace landing page. Expanded on read,
      * not on write, so the stored/offered entry stays what the user typed.
@@ -49,20 +49,22 @@ class ServerStore(
         prefs
             .getString(KEY_RECENTS, null)
             ?.split("\n")
-            ?.filter { it.isNotBlank() }
+            ?.mapNotNull(::normalizeServerUrl)
             .orEmpty()
 
     /** Set the current server and push it to the front of the recents list. */
     fun connect(url: String) {
-        val recents = (listOf(url) + recentServers()).distinct().take(MAX_RECENTS)
+        val normalized = normalizeServerUrl(url) ?: return
+        val recents = (listOf(normalized) + recentServers()).distinct().take(MAX_RECENTS)
         prefs
             .edit()
-            .putString(KEY_CURRENT, url)
+            .putString(KEY_CURRENT, normalized)
             .putString(KEY_RECENTS, recents.joinToString("\n"))
             .apply()
     }
 
-    private fun storedServerUrl(): String? = prefs.getString(KEY_CURRENT, null)
+    private fun storedServerUrl(): String? =
+        prefs.getString(KEY_CURRENT, null)?.let(::normalizeServerUrl)
 
     private companion object {
         const val PREFS = "ai.omnigent.android.servers"
@@ -70,7 +72,7 @@ class ServerStore(
         const val KEY_RECENTS = "recent_server_urls"
         const val MAX_RECENTS = 8
 
-        // 10.0.2.2 is the host loopback from the Android emulator.
-        const val DEFAULT_DEBUG_SERVER = "http://10.0.2.2:8000"
+        // 10.0.2.2 is the host loopback from the Android emulator; it must serve trusted TLS.
+        const val DEFAULT_DEBUG_SERVER = "https://10.0.2.2:8000"
     }
 }

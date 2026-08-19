@@ -172,6 +172,27 @@ async def test_read_file_content(
 
 
 @pytest.mark.asyncio
+async def test_download_read_uses_requested_cap_and_returns_all_lines(
+    client: httpx.AsyncClient, workspace: Path
+) -> None:
+    """The bounded download mode bypasses preview byte and line limits."""
+    content = ("line\n" * 2_100).encode()
+    (workspace / "many-lines.txt").write_bytes(content)
+
+    resp = await client.get(
+        f"/v1/sessions/conv_test/resources/environments"
+        f"/{DEFAULT_ENVIRONMENT_ID}/filesystem/many-lines.txt",
+        params={"download": "true", "max_bytes": str(len(content) + 1)},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["truncated"] is False
+    assert body["bytes"] == len(content)
+    assert body["content"] == content.decode()
+
+
+@pytest.mark.asyncio
 async def test_read_binary_file_content(
     client: httpx.AsyncClient,
 ) -> None:

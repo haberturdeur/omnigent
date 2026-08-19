@@ -220,7 +220,7 @@ export function DescribedSelect({
 }: {
   value: string;
   onValueChange: (value: string) => void;
-  options: readonly { value: string; label: string; description: string }[];
+  options: readonly { value: string; label: string; description: string; disabled?: boolean }[];
   testId: string;
   ariaLabel: string;
   disabled?: boolean;
@@ -258,6 +258,7 @@ export function DescribedSelect({
           <SelectItem
             key={o.value}
             value={o.value}
+            disabled={o.disabled}
             onPointerEnter={() => setPreviewed(o.value)}
             onFocus={() => setPreviewed(o.value)}
           >

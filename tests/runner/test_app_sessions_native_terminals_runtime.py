@@ -3211,6 +3211,42 @@ async def test_codex_discover_thread_and_forward_persists_workspace_as_bridge_cw
 
 
 @pytest.mark.asyncio
+async def test_codex_resumed_forwarder_sends_runner_binding_token(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Private-profile callbacks carry the runner's session authority."""
+    from omnigent import codex_native_forwarder
+    from omnigent.runner import _entry
+    from omnigent.runner.app import _codex_forward_known_thread
+    from omnigent.runner.identity import (
+        RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR,
+        RUNNER_TUNNEL_TOKEN_HEADER,
+    )
+
+    captured: dict[str, object] = {}
+
+    async def _capture_forwarder(**kwargs: object) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setenv("RUNNER_SERVER_URL", "http://127.0.0.1:6767")
+    monkeypatch.setenv(RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR, "private-runner-binding")
+    monkeypatch.setattr(_entry, "_make_auth_token_factory", lambda: lambda: "owner-bearer")
+    monkeypatch.setattr(codex_native_forwarder, "supervise_forwarder", _capture_forwarder)
+
+    await _codex_forward_known_thread(
+        session_id="private-session",
+        bridge_dir=tmp_path,
+        codex_ws_url="ws://127.0.0.1:9876",
+        thread_id="thread-private",
+    )
+
+    assert captured["headers"] == {
+        "Authorization": "Bearer owner-bearer",
+        RUNNER_TUNNEL_TOKEN_HEADER: "private-runner-binding",
+    }
+
+
+@pytest.mark.asyncio
 async def test_cold_start_agy_conversation_rejects_a_foreign_agy_cascade(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

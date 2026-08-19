@@ -13,6 +13,7 @@ from omnigent.entities import Conversation
 from omnigent.runtime.policies.builder import load_session_tree, load_session_usage
 from omnigent.server.auth import RESERVED_USER_LOCAL, AuthProvider
 from omnigent.server.feature_flags import Feature, FeatureFlags, resolve_feature_flags
+from omnigent.server.profile_protection import PROFILE_UNLOCK_HEADER, profile_is_accessible
 from omnigent.server.routes._auth_helpers import require_user
 from omnigent.server.routes._sessions.helpers import (
     _resolve_harness_impl,
@@ -119,6 +120,7 @@ def _build_usage_report(
     user_id: str | None,
     *,
     include_page_details: bool = False,
+    profile_unlock: str | None = None,
 ) -> UsageReport:
     """
     Build the usage report: a daily-rollup cost summary plus session detail.
@@ -146,13 +148,8 @@ def _build_usage_report(
     # same rows the write path recorded.
     rollup_user = user_id if user_id is not None else RESERVED_USER_LOCAL
 
-    today = _utc_today()
-    cost_today = conversation_store.sum_daily_cost(rollup_user, today)
-    cost_7d = conversation_store.sum_daily_cost(rollup_user, _day_offset(today, days=6))
-    cost_30d = conversation_store.sum_daily_cost(rollup_user, _day_offset(today, days=29))
-    total = conversation_store.sum_daily_cost(rollup_user, _EPOCH_DAY)
-
     sessions: list[SessionUsage] = []
+    hidden_profile_activity = False
     after: str | None = None
     while True:
         page = conversation_store.list_conversations(
@@ -166,6 +163,11 @@ def _build_usage_report(
         )
         for conv in page.data:
             if conv.agent_id is None:
+                continue
+            if conv.profile_id is not None and not profile_is_accessible(
+                conv.profile_id, profile_unlock
+            ):
+                hidden_profile_activity = True
                 continue
             usage = load_session_usage(conv.id, conversation_store)
             primary_harness = _resolve_session_harness(conv) if include_page_details else None
@@ -195,11 +197,22 @@ def _build_usage_report(
             break
         after = page.last_id
 
-    daily_costs_raw = (
-        conversation_store.list_daily_costs(rollup_user, _EPOCH_DAY)
-        if include_page_details
-        else []
-    )
+    today = _utc_today()
+    if hidden_profile_activity:
+        # The rollup is user-wide and cannot safely subtract a locked profile.
+        # Redact it rather than disclose when or how much that profile spent.
+        cost_today = cost_7d = cost_30d = total = 0.0
+        daily_costs_raw: list[tuple[str, float]] = []
+    else:
+        cost_today = conversation_store.sum_daily_cost(rollup_user, today)
+        cost_7d = conversation_store.sum_daily_cost(rollup_user, _day_offset(today, days=6))
+        cost_30d = conversation_store.sum_daily_cost(rollup_user, _day_offset(today, days=29))
+        total = conversation_store.sum_daily_cost(rollup_user, _EPOCH_DAY)
+        daily_costs_raw = (
+            conversation_store.list_daily_costs(rollup_user, _EPOCH_DAY)
+            if include_page_details
+            else []
+        )
 
     return UsageReport(
         cost_today=cost_today,
@@ -249,6 +262,7 @@ def create_usage_router(
             conversation_store,
             user_id,
             include_page_details=flags.enabled(Feature.USAGE_PAGE),
+            profile_unlock=request.headers.get(PROFILE_UNLOCK_HEADER),
         )
 
     return router

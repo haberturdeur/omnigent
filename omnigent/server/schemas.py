@@ -1478,6 +1478,7 @@ class _SessionCreateRequestBase(BaseModel):
     # main's ordering. Concrete public models narrow the wire type below.
     agent_id: Any
     project_id: str | None = None
+    profile_id: str | None = None
     initial_items: list[SessionEventInput] = Field(default_factory=list)
     title: str | None = Field(default=None, max_length=USER_SESSION_TITLE_MAX_CHARS)
     labels: dict[str, str] = Field(default_factory=dict)
@@ -1643,6 +1644,7 @@ class SessionCreateMetadata(BaseModel):
 
     title: str | None = Field(default=None, max_length=USER_SESSION_TITLE_MAX_CHARS)
     project_id: str | None = None
+    profile_id: str | None = None
     labels: dict[str, str] = Field(default_factory=dict)
     reasoning_effort: str | None = None
     host_id: str | None = None
@@ -2154,6 +2156,7 @@ class SessionResponse(BaseModel):
     # ``labels``); set/cleared via ``PATCH /v1/sessions/{id}`` and filtered on
     # ``GET /v1/sessions?project=``.
     project_id: str | None = None
+    profile_id: str | None = None
 
 
 class UpdateSessionRequest(BaseModel):
@@ -2199,6 +2202,11 @@ class UpdateSessionRequest(BaseModel):
         fields here the switch is applied by the live TUI, so a failure
         to reach the mode is surfaced as an error rather than persisted.
         Omitted leaves unchanged.
+    :param codex_approval_mode: Live Codex permission preset. ``"default"``
+        uses workspace-write with on-request approvals, ``"read-only"``
+        requires approval for writes and commands, and ``"full-access"``
+        removes Codex filesystem/network restrictions. The server applies the
+        setting to the loaded Codex thread before persisting its resume args.
     :param cost_control_mode_override: Per-session cost-control
         switch: ``"on"`` activates the spec's configured cost-control
         mode, ``"off"`` disables cost control for this session.
@@ -2248,6 +2256,10 @@ class UpdateSessionRequest(BaseModel):
         owner-private, only the session owner may file it, and only into a
         project they own — the server verifies both. Independent of the
         legacy ``omni_project`` label, which is set via ``labels``.
+    :param profile_id: Move an unfiled top-level session and its sub-agent tree
+        into another profile. Owner-only. The source and destination profiles
+        must be unlocked, and private-profile workspace boundaries still apply.
+        Omit the field to leave profile ownership unchanged.
     """
 
     runner_id: str | None = None
@@ -2257,12 +2269,14 @@ class UpdateSessionRequest(BaseModel):
     model_override: str | None = None
     collaboration_mode: str | None = None
     permission_mode: str | None = None
+    codex_approval_mode: str | None = None
     cost_control_mode_override: str | None = None
     subagent_routing_override: str | None = None
     external_session_id: str | None = None
     terminal_launch_args: list[str] | None = None
     archived: bool | None = None
     project_id: str | None = None
+    profile_id: str | None = None
     silent: bool = False
 
     model_config = ConfigDict(extra="forbid")
@@ -4783,6 +4797,77 @@ class SessionProjectSummary(BaseModel):
     icon: str | None = None
 
 
+class CreateProfileRequest(BaseModel):
+    """Request body for ``POST /v1/profiles``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    icon: str | None = Field(default=None, max_length=64)
+    color: str | None = Field(default=None, max_length=32)
+    config: dict[str, Any] = Field(default_factory=dict)
+    protection: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("name must not be empty")
+        if len(trimmed) > 100:
+            raise ValueError("name must be at most 100 characters")
+        return trimmed
+
+
+class UpdateProfileRequest(BaseModel):
+    """Request body for ``PATCH /v1/profiles/{profile_id}``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = None
+    icon: str | None = Field(default=None, max_length=64)
+    color: str | None = Field(default=None, max_length=32)
+    config: dict[str, Any] | None = None
+    protection: dict[str, Any] | None = None
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("name must not be empty")
+        if len(trimmed) > 100:
+            raise ValueError("name must be at most 100 characters")
+        return trimmed
+
+
+class ConfigureProfileProtectionRequest(BaseModel):
+    """Configure the passcode and protected roots for one private profile."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    passcode: str | None = Field(default=None, max_length=1024)
+    protected_roots: list[str] = Field(min_length=1, max_length=16)
+
+
+class AddProjectPrivateRootRequest(BaseModel):
+    """Protect a project's existing workspace and move it into the profile."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str
+
+
+class UnlockProfileRequest(BaseModel):
+    """Unlock one private profile for the current browser or device."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    passcode: str = Field(min_length=1, max_length=1024)
+
+
 class CreateProjectRequest(BaseModel):
     """
     Request body for ``POST /v1/projects``.
@@ -4796,6 +4881,7 @@ class CreateProjectRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str
+    profile_id: str | None = None
     config: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("name")
@@ -4831,6 +4917,8 @@ class UpdateProjectRequest(BaseModel):
 
     name: str | None = None
     config: dict[str, Any] | None = None
+    profile_id: str | None = None
+    adopt_legacy_name: str | None = None
 
     @field_validator("name")
     @classmethod
@@ -4849,3 +4937,9 @@ class UpdateProjectRequest(BaseModel):
         if len(trimmed) > 100:
             raise ValueError("name must be at most 100 characters")
         return trimmed
+
+    @field_validator("adopt_legacy_name")
+    @classmethod
+    def _validate_legacy_name(cls, value: str | None) -> str | None:
+        """Apply project-name validation to a legacy folder name."""
+        return cls._validate_name(value)

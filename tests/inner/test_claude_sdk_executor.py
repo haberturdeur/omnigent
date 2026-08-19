@@ -3211,6 +3211,7 @@ def test_prepare_claude_cli_path_bypasses_wrapper_when_env_set(
     from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
 
     monkeypatch.setenv("OMNIGENT_CLAUDE_SDK_NO_SANDBOX", env_value)
+    monkeypatch.setattr("omnigent.inner.sandbox._profile_isolation_masks", lambda _cwd: [])
 
     def _fail_if_called(*args, **kwargs) -> str:
         raise AssertionError("create_exec_launcher must not be called when bypass is enabled")

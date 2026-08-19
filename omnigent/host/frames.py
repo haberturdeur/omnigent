@@ -64,6 +64,8 @@ class HostFrameKind(str, Enum):
     LIST_WORKTREES_RESULT = "host.list_worktrees_result"
     CREATE_DIR = "host.create_dir"
     CREATE_DIR_RESULT = "host.create_dir_result"
+    MOVE_DIR = "host.move_dir"
+    MOVE_DIR_RESULT = "host.move_dir_result"
     INSTALL_HARNESS = "host.install_harness"
     INSTALL_HARNESS_RESULT = "host.install_harness_result"
     STORE_SECRET = "host.store_secret"
@@ -118,6 +120,7 @@ class HostHelloFrame:
     gateway_inference: dict[str, bool] | None = None
     telemetry_opt_out: bool = False
     installation_id: str | None = None
+    capabilities: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -173,6 +176,13 @@ class HostLaunchRunnerFrame:
         :data:`HARNESS_NOT_CONFIGURED_ERROR_CODE` when not.
         ``None`` (older server, or no resolvable harness) skips
         the check — fail open.
+    :param isolation_generation: Monotonic private-profile protection
+        generation captured with *isolation_masks*. ``None`` identifies an
+        older server that did not send an isolation snapshot.
+    :param isolation_host_id: Host namespace used to compute the masks.
+    :param isolation_masks: Canonical absolute roots the launched runner must
+        hide. ``None`` identifies an older server; an empty list is a valid
+        snapshot for a workspace that may see every currently protected root.
     """
 
     request_id: str
@@ -180,6 +190,9 @@ class HostLaunchRunnerFrame:
     workspace: str
     session_id: str | None = None
     harness: str | None = None
+    isolation_generation: int | None = None
+    isolation_host_id: str | None = None
+    isolation_masks: list[str] | None = None
 
 
 @dataclass
@@ -629,6 +642,26 @@ class HostCreateDirResultFrame:
 
 
 @dataclass
+class HostMoveDirFrame:
+    """Server → host: move a directory without replacing an existing path."""
+
+    request_id: str
+    source_path: str
+    destination_path: str
+
+
+@dataclass
+class HostMoveDirResultFrame:
+    """Host → server: outcome of a directory move."""
+
+    request_id: str
+    status: str
+    source_path: str | None = None
+    destination_path: str | None = None
+    error: str | None = None
+
+
+@dataclass
 class HostInstallHarnessFrame:
     """Server → host: install a harness CLI on the host.
 
@@ -969,6 +1002,8 @@ HostFrame = (
     | HostListWorktreesResultFrame
     | HostCreateDirFrame
     | HostCreateDirResultFrame
+    | HostMoveDirFrame
+    | HostMoveDirResultFrame
     | HostInstallHarnessFrame
     | HostInstallHarnessResultFrame
     | HostStoreSecretFrame
@@ -1033,6 +1068,7 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "gateway_inference": frame.gateway_inference,
                 "telemetry_opt_out": frame.telemetry_opt_out,
                 "installation_id": frame.installation_id,
+                "capabilities": list(frame.capabilities),
             }
         )
     if isinstance(frame, HostConnectionErrorFrame):
@@ -1061,6 +1097,9 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "workspace": frame.workspace,
                 "session_id": frame.session_id,
                 "harness": frame.harness,
+                "isolation_generation": frame.isolation_generation,
+                "isolation_host_id": frame.isolation_host_id,
+                "isolation_masks": frame.isolation_masks,
             }
         )
     if isinstance(frame, HostLaunchRunnerResultFrame):
@@ -1240,6 +1279,26 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "request_id": frame.request_id,
                 "status": frame.status,
                 "path": frame.path,
+                "error": frame.error,
+            }
+        )
+    if isinstance(frame, HostMoveDirFrame):
+        return _encode_payload(
+            {
+                "kind": HostFrameKind.MOVE_DIR.value,
+                "request_id": frame.request_id,
+                "source_path": frame.source_path,
+                "destination_path": frame.destination_path,
+            }
+        )
+    if isinstance(frame, HostMoveDirResultFrame):
+        return _encode_payload(
+            {
+                "kind": HostFrameKind.MOVE_DIR_RESULT.value,
+                "request_id": frame.request_id,
+                "status": frame.status,
+                "source_path": frame.source_path,
+                "destination_path": frame.destination_path,
                 "error": frame.error,
             }
         )
@@ -1487,6 +1546,10 @@ def _decode_known_host_frame(
             return _decode_create_dir(msg)
         case HostFrameKind.CREATE_DIR_RESULT:
             return _decode_create_dir_result(msg)
+        case HostFrameKind.MOVE_DIR:
+            return _decode_move_dir(msg)
+        case HostFrameKind.MOVE_DIR_RESULT:
+            return _decode_move_dir_result(msg)
         case HostFrameKind.INSTALL_HARNESS:
             return _decode_install_harness(msg)
         case HostFrameKind.INSTALL_HARNESS_RESULT:
@@ -1531,6 +1594,7 @@ def _decode_host_hello(msg: _JsonObject) -> HostHelloFrame:
         gateway_inference=optional_str_bool_map(msg, "gateway_inference"),
         telemetry_opt_out=bool(msg.get("telemetry_opt_out", False)),
         installation_id=_optional_nullable_str(msg, "installation_id"),
+        capabilities=_optional_str_list(msg, "capabilities"),
     )
 
 
@@ -1564,6 +1628,9 @@ def _decode_launch_runner(msg: _JsonObject) -> HostLaunchRunnerFrame:
         workspace=_required_str(msg, "workspace"),
         session_id=_optional_nullable_str(msg, "session_id"),
         harness=_optional_nullable_str(msg, "harness"),
+        isolation_generation=_optional_nullable_nonnegative_int(msg, "isolation_generation"),
+        isolation_host_id=_optional_nullable_str(msg, "isolation_host_id"),
+        isolation_masks=_optional_nullable_str_list(msg, "isolation_masks"),
     )
 
 
@@ -1872,6 +1939,26 @@ def _decode_create_dir_result(msg: _JsonObject) -> HostCreateDirResultFrame:
     )
 
 
+def _decode_move_dir(msg: _JsonObject) -> HostMoveDirFrame:
+    """Decode a host.move_dir request frame."""
+    return HostMoveDirFrame(
+        request_id=_required_str(msg, "request_id"),
+        source_path=_required_str(msg, "source_path"),
+        destination_path=_required_str(msg, "destination_path"),
+    )
+
+
+def _decode_move_dir_result(msg: _JsonObject) -> HostMoveDirResultFrame:
+    """Decode a host.move_dir_result frame."""
+    return HostMoveDirResultFrame(
+        request_id=_required_str(msg, "request_id"),
+        status=_required_str(msg, "status"),
+        source_path=_optional_nullable_str(msg, "source_path"),
+        destination_path=_optional_nullable_str(msg, "destination_path"),
+        error=_optional_nullable_str(msg, "error"),
+    )
+
+
 def _decode_install_harness(msg: _JsonObject) -> HostInstallHarnessFrame:
     """Decode a host.install_harness request frame.
 
@@ -2146,6 +2233,26 @@ def _optional_str_list(msg: _JsonObject, key: str) -> list[str]:
     if not isinstance(val, list) or not all(isinstance(item, str) for item in val):
         raise ValueError(f"frame field must be a list of strings: {key!r}")
     return list(val)
+
+
+def _optional_nullable_str_list(msg: _JsonObject, key: str) -> list[str] | None:
+    """Return an optional nullable list of strings, preserving absence."""
+    val = msg.get(key)
+    if val is None:
+        return None
+    if not isinstance(val, list) or not all(isinstance(item, str) for item in val):
+        raise ValueError(f"frame field must be a list of strings or null: {key!r}")
+    return list(val)
+
+
+def _optional_nullable_nonnegative_int(msg: _JsonObject, key: str) -> int | None:
+    """Return an optional nullable non-negative integer."""
+    val = msg.get(key)
+    if val is None:
+        return None
+    if not isinstance(val, int) or isinstance(val, bool) or val < 0:
+        raise ValueError(f"frame field must be a non-negative int or null: {key!r}")
+    return val
 
 
 def _optional_str_availability_map(

@@ -34,6 +34,7 @@ from omnigent.harness_plugins import (
     native_provider_for_key,
 )
 from omnigent.resources import examples as _examples_resources
+from omnigent.runner.identity import RUNNER_TUNNEL_TOKEN_HEADER, token_bound_runner_id
 from omnigent.runtime import (
     get_terminal_registry,
     pending_elicitations,
@@ -45,7 +46,7 @@ from omnigent.runtime import (
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.runtime.harnesses.process_manager import HarnessProcessManager
 from omnigent.server import session_live_state, shutdown_state
-from omnigent.server.auth import AuthProvider, SharingMode
+from omnigent.server.auth import LEVEL_OWNER, AuthProvider, SharingMode
 from omnigent.server.background_session_titles import (
     BackgroundSessionTitleCoordinator,
     RunnerBackgroundTitleGenerator,
@@ -62,6 +63,16 @@ from omnigent.server.performance_metrics import (
     set_request_session_id_for_access_log,
     set_request_user_agent_for_access_log,
 )
+from omnigent.server.profile_protection import (
+    PROFILE_UNLOCK_HEADER,
+    configure_profile_protection_registry,
+    get_profile_protection_by_id,
+    profile_is_accessible,
+)
+from omnigent.server.push_notifications import (
+    PushNotificationDispatcher,
+    PushSubscriptionStore,
+)
 from omnigent.server.routes.builtin_agents import create_builtin_agents_router
 from omnigent.server.routes.comments import create_comments_router
 from omnigent.server.routes.default_policies import create_default_policies_router
@@ -69,7 +80,9 @@ from omnigent.server.routes.dictation import create_dictation_router
 from omnigent.server.routes.harnesses import create_harnesses_router
 from omnigent.server.routes.imports import create_imports_router
 from omnigent.server.routes.policy_registry import create_policy_registry_router
+from omnigent.server.routes.profiles import create_profiles_router
 from omnigent.server.routes.projects import create_projects_router
+from omnigent.server.routes.push_notifications import create_push_notifications_router
 from omnigent.server.routes.runner_tunnel import create_runner_tunnel_router
 from omnigent.server.routes.scheduled_tasks import create_scheduled_tasks_router
 from omnigent.server.routes.session_mcp_servers import create_session_mcp_servers_router
@@ -98,6 +111,7 @@ from omnigent.stores.conversation_store import SessionConnectivity, runner_seen_
 from omnigent.stores.host_store import HostStore
 from omnigent.stores.permission_store import PermissionStore
 from omnigent.stores.policy_store import PolicyStore
+from omnigent.stores.profile_store import ProfileStore
 from omnigent.stores.project_store import ProjectStore
 from omnigent.stores.scheduled_task_store import ScheduledTaskStore
 
@@ -225,6 +239,7 @@ def _session_id_from_request(request: Request) -> str | None:
     return match.group(1) if match else None
 
 
+_SESSION_ID_RE = re.compile(r"(?:conv_)?[0-9a-fA-F]{32}")
 # polly's and debby's multi-file bundles are packaged under
 # omnigent.resources.examples (see pyproject package-data), so they resolve
 # in both a repo checkout and an installed wheel. The presence check in each
@@ -936,6 +951,7 @@ def create_app(
     permission_store: PermissionStore | None = None,
     scheduled_task_store: ScheduledTaskStore | None = None,
     project_store: ProjectStore | None = None,
+    profile_store: ProfileStore | None = None,
     auth_provider: AuthProvider | None = None,
     host_store: HostStore | None = None,
     account_store: Any | None = None,  # SqlAlchemyAccountStore — accounts mode only
@@ -985,6 +1001,7 @@ def create_app(
     :param project_store: Store for first-class projects (owner-private
         containers that group sessions). ``None`` disables the
         ``/v1/projects`` CRUD endpoints.
+    :param profile_store: Store for switchable owner-private profiles.
     :param auth_provider: Pre-constructed auth provider for
         identity resolution. ``None`` disables auth (anonymous
         access). **Required** when ``permission_store`` is
@@ -1063,6 +1080,11 @@ def create_app(
     """
     if permission_store is not None and auth_provider is None:
         raise ValueError("auth_provider is required when permission_store is provided")
+    if profile_store is not None:
+        configure_profile_protection_registry(
+            profile_store.storage_location,
+            declared_protected_profile_ids=profile_store.list_protected_profile_ids,
+        )
 
     from omnigent.server.server_config import (
         load_branding_snapshot,
@@ -1147,6 +1169,13 @@ def create_app(
     _mcp_pool = ServerMcpPool()
     server_metrics = ServerPerformanceMetrics()
     server_metrics_otel = ServerMetricsOtelPublisher()
+    push_subscription_store = PushSubscriptionStore(conversation_store.storage_location)
+    push_dispatcher = PushNotificationDispatcher(
+        store=push_subscription_store,
+        conversation_store=conversation_store,
+        permission_store=permission_store,
+        profile_store=profile_store,
+    )
 
     @asynccontextmanager
     async def _lifespan(
@@ -1341,9 +1370,14 @@ def create_app(
             # endpoints (see routes/scheduled_tasks.py); there is no startup
             # sweep and no periodic reconcile.
 
+        from omnigent.runtime.session_stream import configure_notification_sink
+
+        uninstall_push_sink = configure_notification_sink(push_dispatcher.observe)
         try:
             yield
         finally:
+            uninstall_push_sink()
+            push_dispatcher.close()
             # Run completion is event-driven (the _publish_status hook) plus a
             # lazy-on-read stale backstop — there is no run-reconciler task to
             # cancel. Only the per-job scheduler holds timers that need stopping.
@@ -1532,6 +1566,61 @@ def create_app(
             )
         except Exception:  # noqa: BLE001 — attribution is best-effort
             set_current_user_id(None)
+
+        # A locked private session is indistinguishable from a missing one.
+        # A runner's session-bound tunnel credential remains valid for its own
+        # control plane without inheriting a browser unlock bearer.
+        if (
+            session_match is not None
+            and _SESSION_ID_RE.fullmatch(session_match.group(1)) is not None
+            and profile_store is not None
+        ):
+            session_id = session_match.group(1)
+            conversation = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+            if conversation is not None and conversation.profile_id is not None:
+                registry_protected = (
+                    get_profile_protection_by_id(conversation.profile_id) is not None
+                )
+                declared_protection = await asyncio.to_thread(
+                    profile_store.get_protection,
+                    conversation.profile_id,
+                )
+                declared_protected = declared_protection.get("lock") in {
+                    "passcode",
+                    "device",
+                }
+                if registry_protected or declared_protected:
+                    caller_is_owner = True
+                    if permission_store is not None and auth_provider is not None:
+                        user_id = auth_provider.get_user_id(request)
+                        level = await asyncio.to_thread(
+                            permission_store.get_permission_level,
+                            user_id,
+                            session_id,
+                        )
+                        caller_is_owner = level is None or level >= LEVEL_OWNER
+                    browser_unlocked = registry_protected and profile_is_accessible(
+                        conversation.profile_id, request.headers.get(PROFILE_UNLOCK_HEADER)
+                    )
+                    binding_token = request.headers.get(RUNNER_TUNNEL_TOKEN_HEADER)
+                    runner_unlocked = False
+                    if binding_token and conversation.runner_id:
+                        try:
+                            runner_unlocked = (
+                                token_bound_runner_id(binding_token) == conversation.runner_id
+                            )
+                        except RuntimeError:
+                            runner_unlocked = False
+                    if caller_is_owner and not browser_unlocked and not runner_unlocked:
+                        return JSONResponse(
+                            status_code=404,
+                            content={
+                                "error": {
+                                    "code": ErrorCode.NOT_FOUND,
+                                    "message": "Session not found",
+                                }
+                            },
+                        )
 
         failed = False
         status_code: int | None = None
@@ -2280,6 +2369,7 @@ def create_app(
             # Validates target-project ownership when PATCH /v1/sessions/{id}
             # files a session into a project (owner-private membership).
             project_store=project_store,
+            profile_store=profile_store,
             background_title_coordinator=background_title_coordinator,
         ),
         prefix="/v1",
@@ -2294,6 +2384,7 @@ def create_app(
             project_store=project_store,
             host_registry=host_registry,
             host_store=host_store,
+            profile_store=profile_store,
         ),
         prefix="/v1",
         tags=["imports"],
@@ -2308,6 +2399,15 @@ def create_app(
         ),
         prefix="/v1",
         tags=["usage"],
+    )
+    app.include_router(
+        create_push_notifications_router(
+            push_subscription_store,
+            auth_provider=auth_provider,
+            acknowledger=push_dispatcher,
+        ),
+        prefix="/v1",
+        tags=["push_notifications"],
     )
     # Read-only built-in agent discovery (designs/BUILTIN_AGENTS.md).
     # Successor to the removed GET /api/agents list; lists only
@@ -2424,9 +2524,27 @@ def create_app(
             create_projects_router(
                 project_store=project_store,
                 auth_provider=auth_provider,
+                profile_store=profile_store,
+                conversation_store=conversation_store,
+                host_registry=host_registry,
+                host_store=host_store,
+                runner_router=runner_router,
             ),
             prefix="/v1",
             tags=["projects"],
+        )
+    if profile_store is not None:
+        app.include_router(
+            create_profiles_router(
+                profile_store=profile_store,
+                auth_provider=auth_provider,
+                conversation_store=conversation_store,
+                runner_router=runner_router,
+                project_store=project_store,
+                host_store=host_store,
+            ),
+            prefix="/v1",
+            tags=["profiles"],
         )
 
     # ── Tunnel lifecycle callbacks (Step 8.5 crash recovery) ───
@@ -2753,6 +2871,9 @@ def create_app(
             auth_provider=auth_provider,
             runner_exit_reports=runner_exit_reports,
             resolve_managed_runner_owner=_resolve_managed_runner_owner,
+            declared_protected_profile_ids=(
+                profile_store.list_protected_profile_ids if profile_store is not None else None
+            ),
         ),
         prefix="/v1",
         tags=["runners"],

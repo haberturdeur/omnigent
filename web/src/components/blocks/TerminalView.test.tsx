@@ -13,6 +13,7 @@ import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Toaster } from "@/components/ui/sonner";
 import { toast } from "sonner";
+import { setProfileUnlockToken, setUnlockActiveProfile } from "@/lib/profileUnlock";
 import type { ConnectionState } from "./TerminalSession";
 import {
   TerminalView,
@@ -33,6 +34,7 @@ const terminalSessionMock = vi.hoisted(() => ({
     container: HTMLDivElement;
     clipboardEnabled: boolean;
     onClipboardRequest?: (text: string) => void;
+    profileUnlockToken: string | null;
     onState: (state: ConnectionState) => void;
     dispose: ReturnType<typeof vi.fn>;
     setTheme: ReturnType<typeof vi.fn>;
@@ -60,12 +62,15 @@ vi.mock("./TerminalSession", async (importOriginal) => ({
       _onInput?: () => void,
       clipboardEnabled = true,
       onClipboardRequest?: (text: string) => void,
+      _focusOnConnect = true,
+      profileUnlockToken: string | null = null,
     ) {
       terminalSessionMock.instances.push({
         url,
         container,
         clipboardEnabled,
         onClipboardRequest,
+        profileUnlockToken,
         onState,
         dispose: this.dispose,
         setTheme: this.setTheme,
@@ -81,12 +86,25 @@ beforeEach(() => {
   render(<Toaster visibleToasts={100} />);
   terminalSessionMock.instances = [];
   clipboardMock.copyText.mockReset().mockResolvedValue(undefined);
+  setUnlockActiveProfile(null);
 });
 
 afterEach(() => {
   act(() => toast.dismiss());
   cleanup();
   vi.restoreAllMocks();
+});
+
+it("passes the active private-profile unlock token to the relay terminal", async () => {
+  setProfileUnlockToken("profile-private", "unlock-token");
+  setUnlockActiveProfile("profile-private");
+
+  render(<TerminalView sessionId="conv_private" terminalId="terminal_codex_main" />);
+  await waitFor(() => expect(terminalSessionMock.instances).toHaveLength(1));
+
+  expect(terminalSessionMock.instances[0].profileUnlockToken).toBe("unlock-token");
+  setProfileUnlockToken("profile-private", null);
+  setUnlockActiveProfile(null);
 });
 
 describe("buildAttachPath", () => {

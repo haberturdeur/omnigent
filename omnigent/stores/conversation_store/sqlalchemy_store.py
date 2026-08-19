@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager, nullcontext
 from typing import Any, Protocol, cast
 
 from sqlalchemy import (
@@ -94,6 +96,10 @@ from omnigent.stores.conversation_store import (
     CreatedSession,
     SessionConnectivity,
     pinned_label_key,
+)
+from omnigent.stores.project_store import legacy_project_membership_guard
+from omnigent.stores.project_store.legacy_membership import (
+    acquire_legacy_membership_db_lock,
 )
 
 _logger = logging.getLogger(__name__)
@@ -244,6 +250,7 @@ def _to_conversation(
         ),
         pending_elicitation_count=meta.pending_elicitation_count if meta else None,
         project_id=meta.project_id if meta else None,
+        profile_id=meta.profile_id if meta else None,
     )
 
 
@@ -305,6 +312,7 @@ def _new_session_metadata_row(
     workspace: str | None = None,
     terminal_launch_args: list[str] | None = None,
     project_id: str | None = None,
+    profile_id: str | None = None,
 ) -> SqlConversationMetadata:
     """
     Build the Omnigent metadata row paired with a new session conversation.
@@ -325,6 +333,7 @@ def _new_session_metadata_row(
         kind=encode_conversation_kind("sub_agent" if parent_conversation_id else "default"),
         runner_id=runner_id,
         project_id=project_id,
+        profile_id=profile_id,
         workspace=workspace,
         terminal_launch_args=(
             json.dumps(terminal_launch_args) if terminal_launch_args is not None else None
@@ -881,6 +890,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         terminal_launch_args: list[str] | None = None,
         conversation_id: str | None = None,
         project_id: str | None = None,
+        profile_id: str | None = None,
     ) -> Conversation:
         """
         Create a new conversation in the database.
@@ -1007,6 +1017,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                 runner_id=runner_id,
                 host_id=host_id,
                 sub_agent_name=sub_agent_name,
+                profile_id=profile_id,
                 workspace=workspace,
                 git_branch=git_branch,
                 terminal_launch_args=(
@@ -1014,7 +1025,20 @@ class SqlAlchemyConversationStore(ConversationStore):
                 ),
                 project_id=project_id,
             )
-            with self._session("insert_conversation_metadata") as meta_sess:
+            with self._session_immediate("insert_conversation_metadata") as meta_sess:
+                if parent_conversation_id is not None:
+                    parent_stmt = select(SqlConversationMetadata).where(
+                        SqlConversationMetadata.workspace_id == current_workspace_id(),
+                        SqlConversationMetadata.id == parent_conversation_id,
+                    )
+                    if self._supports_for_update:
+                        parent_stmt = parent_stmt.with_for_update()
+                    parent_meta = meta_sess.execute(parent_stmt).scalar_one_or_none()
+                    if parent_meta is None:
+                        raise ConversationNotFoundError(
+                            f"parent conversation {parent_conversation_id!r} does not exist"
+                        )
+                    meta.profile_id = parent_meta.profile_id
                 meta_sess.add(meta)
             return _to_conversation(row, meta)
         except IntegrityError as exc:
@@ -1311,7 +1335,15 @@ class SqlAlchemyConversationStore(ConversationStore):
         if not updates:
             return
         stamp = updated_at if updated_at is not None else now_epoch()
-        with self._conv_session("set_labels") as session:
+        guard = (
+            legacy_project_membership_guard() if PROJECT_LABEL_KEY in updates else nullcontext()
+        )
+        session_maker = (
+            self._conv_session_immediate if PROJECT_LABEL_KEY in updates else self._conv_session
+        )
+        with guard, session_maker("set_labels") as session:
+            if PROJECT_LABEL_KEY in updates:
+                acquire_legacy_membership_db_lock(session)
             _upsert_labels(session, conversation_id, updates, stamp)
 
     def set_session_state(
@@ -1401,6 +1433,133 @@ class SqlAlchemyConversationStore(ConversationStore):
                 ),
             )
             return result.rowcount > 0
+
+    def move_conversations_to_profile(
+        self,
+        conversation_ids: tuple[str, ...],
+        *,
+        expected_profile_id: str | None,
+        destination_profile_id: str,
+    ) -> bool:
+        """Atomically move an unfiled session tree into another profile."""
+        from omnigent.stores.conversation_store import (
+            ConversationProfileChangedError,
+            ConversationProjectProfileMismatchError,
+            ConversationTreeChangedError,
+        )
+
+        unique_ids = tuple(dict.fromkeys(conversation_ids))
+        if not unique_ids:
+            return False
+        with self._session_immediate("move_sessions_to_profile") as session:
+            stmt = select(SqlConversationMetadata).where(
+                SqlConversationMetadata.workspace_id == current_workspace_id(),
+                SqlConversationMetadata.id.in_(unique_ids),
+            )
+            if self._supports_for_update:
+                stmt = stmt.with_for_update()
+            rows = list(session.execute(stmt).scalars())
+            if len(rows) != len(unique_ids):
+                return False
+            if any(row.profile_id != expected_profile_id for row in rows):
+                raise ConversationProfileChangedError(unique_ids[0])
+            if any(row.project_id is not None for row in rows):
+                raise ConversationProjectProfileMismatchError(unique_ids[0])
+            root_id = unique_ids[0]
+            with self._conv_session("validate_session_tree_move") as ap_session:
+                actual_ids = set(
+                    ap_session.execute(
+                        select(SqlConversation.id).where(
+                            SqlConversation.workspace_id == current_workspace_id(),
+                            SqlConversation.root_conversation_id == root_id,
+                        )
+                    ).scalars()
+                )
+            if actual_ids != set(unique_ids):
+                raise ConversationTreeChangedError(root_id)
+            for row in rows:
+                row.profile_id = destination_profile_id
+            return True
+
+    def get_project_member_session_ids(
+        self,
+        project_id: str,
+        *,
+        expected_profile_id: str | None,
+    ) -> tuple[str, ...]:
+        """Return exact first-class project members in one profile."""
+        with self._session("list_project_members") as session:
+            return tuple(
+                session.execute(
+                    select(SqlConversationMetadata.id)
+                    .where(
+                        SqlConversationMetadata.workspace_id == current_workspace_id(),
+                        SqlConversationMetadata.project_id == project_id,
+                        SqlConversationMetadata.profile_id == expected_profile_id,
+                    )
+                    .order_by(SqlConversationMetadata.id)
+                ).scalars()
+            )
+
+    def get_legacy_project_session_ids(
+        self,
+        project_name: str,
+        profile_id: str | None,
+        project_id: str,
+    ) -> tuple[str, ...]:
+        """Resolve new and already-adopted members for retryable cleanup."""
+        with self._conv_session("resolve_legacy_project_membership") as session:
+            labelled_ids = tuple(
+                session.execute(
+                    select(SqlConversationLabel.conversation_id).where(
+                        SqlConversationLabel.workspace_id == current_workspace_id(),
+                        SqlConversationLabel.key == PROJECT_LABEL_KEY,
+                        SqlConversationLabel.value == project_name,
+                    )
+                ).scalars()
+            )
+        if not labelled_ids:
+            return ()
+        with self._session("resolve_legacy_project_membership") as session:
+            ids = session.execute(
+                select(SqlConversationMetadata.id).where(
+                    SqlConversationMetadata.workspace_id == current_workspace_id(),
+                    SqlConversationMetadata.id.in_(labelled_ids),
+                    SqlConversationMetadata.profile_id == profile_id,
+                    or_(
+                        SqlConversationMetadata.project_id.is_(None),
+                        SqlConversationMetadata.project_id == project_id,
+                    ),
+                )
+            ).scalars()
+            return tuple(ids)
+
+    @contextmanager
+    def hold_legacy_project_membership_lock(self) -> Iterator[None]:
+        """Serialize split-store adoption with label writers across workers."""
+        with (
+            legacy_project_membership_guard(),
+            self._conv_session_immediate("serialize_legacy_project_adoption") as session,
+        ):
+            acquire_legacy_membership_db_lock(session)
+            yield
+
+    def delete_legacy_project_labels(self, conversation_ids: tuple[str, ...]) -> None:
+        """Clear adopted legacy project labels in one AP transaction."""
+        if not conversation_ids:
+            return
+        with (
+            legacy_project_membership_guard(),
+            self._conv_session_immediate("finalize_legacy_project_adoption") as session,
+        ):
+            acquire_legacy_membership_db_lock(session)
+            session.execute(
+                delete(SqlConversationLabel).where(
+                    SqlConversationLabel.workspace_id == current_workspace_id(),
+                    SqlConversationLabel.conversation_id.in_(conversation_ids),
+                    SqlConversationLabel.key == PROJECT_LABEL_KEY,
+                )
+            )
 
     def increment_session_usage(
         self,
@@ -2121,6 +2280,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         self,
         accessible_by: str | None = None,
         owned_by: str | None = None,
+        profile_id: str | None = None,
     ) -> list[str]:
         """
         Return all distinct project names, ordered alphabetically.
@@ -2145,6 +2305,8 @@ class SqlAlchemyConversationStore(ConversationStore):
             folders only on "My sessions"; scoping by ownership keeps a
             project shared *with* the user (but owned by someone else) from
             surfacing as one of their own folders.
+        :param profile_id: When set, restrict to sessions assigned to this
+            profile.
         :returns: List of project names ordered ascending.
         """
         from omnigent.server.auth import LEVEL_OWNER
@@ -2153,7 +2315,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         # the Omnigent DB, so it still needs a pre-fetch; archived now lives on
         # the AP conversations table and is filtered inline below.
         permission_ids: list[str] | None = None
-        if accessible_by is not None or owned_by is not None:
+        if accessible_by is not None or owned_by is not None or profile_id is not None:
             with self._session("list_projects") as meta_sess:
                 accessible_set: set[str] | None = None
                 owned_set: set[str] | None = None
@@ -2178,10 +2340,23 @@ class SqlAlchemyConversationStore(ConversationStore):
                     )
                 if accessible_set is not None and owned_set is not None:
                     permission_ids = list(accessible_set & owned_set)
-                else:
+                elif accessible_set is not None or owned_set is not None:
                     permission_ids = list(
                         accessible_set if accessible_set is not None else owned_set or set()
                     )
+                if profile_id is not None:
+                    profile_ids = set(
+                        meta_sess.execute(
+                            select(SqlConversationMetadata.id).where(
+                                SqlConversationMetadata.workspace_id == current_workspace_id(),
+                                SqlConversationMetadata.profile_id == profile_id,
+                            )
+                        ).scalars()
+                    )
+                    if permission_ids is None:
+                        permission_ids = list(profile_ids)
+                    else:
+                        permission_ids = list(set(permission_ids) & profile_ids)
         with self._conv_session("list_projects") as ap_sess:
             # Non-archived conversations, resolved on the AP table.
             non_archived_ids = select(SqlConversation.id).where(
@@ -2215,7 +2390,13 @@ class SqlAlchemyConversationStore(ConversationStore):
         :param conversation_id: The conversation to update.
         :param key: The label key to remove, e.g. ``"omni_project"``.
         """
-        with self._conv_session("delete_label") as session:
+        guard = legacy_project_membership_guard() if key == PROJECT_LABEL_KEY else nullcontext()
+        session_maker = (
+            self._conv_session_immediate if key == PROJECT_LABEL_KEY else self._conv_session
+        )
+        with guard, session_maker("delete_label") as session:
+            if key == PROJECT_LABEL_KEY:
+                acquire_legacy_membership_db_lock(session)
             session.execute(
                 delete(SqlConversationLabel).where(
                     SqlConversationLabel.workspace_id == current_workspace_id(),
@@ -2245,6 +2426,8 @@ class SqlAlchemyConversationStore(ConversationStore):
         pinned: bool = False,
         pinned_owner: str | None = None,
         title: str | None = None,
+        profile_id: str | None = None,
+        exclude_profile_ids: frozenset[str] | None = None,
     ) -> PagedList[Conversation]:
         """
         List conversations with cursor-based pagination.
@@ -2331,7 +2514,12 @@ class SqlAlchemyConversationStore(ConversationStore):
         # (kind derived from parent-nullness, archived a real column), so they
         # are filtered directly on the AP query below. The only filters that
         # still require an Omnigent-side prefetch are the permission scopes.
-        needs_meta_filter = (accessible_by is not None) or (owned_by is not None)
+        needs_meta_filter = (
+            accessible_by is not None
+            or owned_by is not None
+            or profile_id is not None
+            or bool(exclude_profile_ids)
+        )
 
         qualifying_ids: list[str] | None = None
         if needs_meta_filter:
@@ -2361,6 +2549,62 @@ class SqlAlchemyConversationStore(ConversationStore):
                             )
                         ).scalars()
                     )
+                if profile_id is not None:
+                    profile_set = set(
+                        meta_sess.execute(
+                            select(SqlConversationMetadata.id).where(
+                                SqlConversationMetadata.workspace_id == current_workspace_id(),
+                                SqlConversationMetadata.profile_id == profile_id,
+                            )
+                        ).scalars()
+                    )
+                    if accessible_by is not None:
+                        viewer_owned = set(
+                            meta_sess.execute(
+                                select(SqlSessionPermission.conversation_id).where(
+                                    SqlSessionPermission.workspace_id == current_workspace_id(),
+                                    SqlSessionPermission.user_id == accessible_by,
+                                    SqlSessionPermission.level >= LEVEL_OWNER,
+                                )
+                            ).scalars()
+                        )
+                        assert accessible_set is not None
+                        accessible_set = (accessible_set - viewer_owned) | (
+                            viewer_owned & profile_set
+                        )
+                    elif owned_set is not None:
+                        owned_set &= profile_set
+                    else:
+                        owned_set = profile_set
+                if exclude_profile_ids:
+                    visible_profile_set = set(
+                        meta_sess.execute(
+                            select(SqlConversationMetadata.id).where(
+                                SqlConversationMetadata.workspace_id == current_workspace_id(),
+                                or_(
+                                    SqlConversationMetadata.profile_id.is_(None),
+                                    SqlConversationMetadata.profile_id.not_in(exclude_profile_ids),
+                                ),
+                            )
+                        ).scalars()
+                    )
+                    if accessible_set is not None:
+                        viewer_owned = set(
+                            meta_sess.execute(
+                                select(SqlSessionPermission.conversation_id).where(
+                                    SqlSessionPermission.workspace_id == current_workspace_id(),
+                                    SqlSessionPermission.user_id == accessible_by,
+                                    SqlSessionPermission.level >= LEVEL_OWNER,
+                                )
+                            ).scalars()
+                        )
+                        accessible_set = (accessible_set - viewer_owned) | (
+                            viewer_owned & visible_profile_set
+                        )
+                    elif owned_set is not None:
+                        owned_set &= visible_profile_set
+                    else:
+                        owned_set = visible_profile_set
                 if accessible_set is not None and owned_set is not None:
                     qualifying_ids = list(accessible_set & owned_set)
                 else:
@@ -3309,6 +3553,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         parent_conversation_id: str | None = None,
         runner_id: str | None = None,
         project_id: str | None = None,
+        profile_id: str | None = None,
     ) -> CreatedSession:
         """
         Atomically insert a conversation row and session-scoped agent.
@@ -3376,8 +3621,10 @@ class SqlAlchemyConversationStore(ConversationStore):
             parent_conversation_id=parent_conversation_id,
             runner_id=runner_id,
             project_id=project_id,
+            profile_id=profile_id,
         )
 
+    @legacy_project_membership_guard()
     def _create_session_with_agent_with_id(
         self,
         conversation_id: str,
@@ -3394,6 +3641,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         parent_conversation_id: str | None = None,
         runner_id: str | None = None,
         project_id: str | None = None,
+        profile_id: str | None = None,
     ) -> CreatedSession:
         """Body of :meth:`create_session_with_agent` under a caller-supplied
         ``conversation_id``. The public method generates a fresh id; this seam
@@ -3405,6 +3653,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         # Conversation + labels go to AP; agent + metadata go to Omnigent.
         # Get parent root_id from AP first.
         root_conversation_id: str | None = None
+        parent_profile_id: str | None = None
         if parent_conversation_id is not None:
             with self._conv_session("create_session_with_agent") as ap_sess:
                 parent_row = ap_sess.get(
@@ -3415,6 +3664,13 @@ class SqlAlchemyConversationStore(ConversationStore):
                         f"parent conversation {parent_conversation_id!r} does not exist"
                     )
                 root_conversation_id = parent_row.root_conversation_id
+            with self._session("create_session_with_agent") as meta_sess:
+                parent_meta = meta_sess.get(
+                    SqlConversationMetadata,
+                    (current_workspace_id(), parent_conversation_id),
+                )
+                if parent_meta is not None:
+                    parent_profile_id = parent_meta.profile_id
 
         conversation_row = _new_session_conversation_row(
             conversation_id,
@@ -3444,14 +3700,29 @@ class SqlAlchemyConversationStore(ConversationStore):
             project_id=project_id,
             workspace=workspace,
             terminal_launch_args=terminal_launch_args,
+            profile_id=parent_profile_id if parent_conversation_id is not None else profile_id,
         )
-        with self._session("create_session_with_agent") as session:
+        with self._session_immediate("create_session_with_agent") as session:
+            if parent_conversation_id is not None:
+                parent_stmt = select(SqlConversationMetadata).where(
+                    SqlConversationMetadata.workspace_id == current_workspace_id(),
+                    SqlConversationMetadata.id == parent_conversation_id,
+                )
+                if self._supports_for_update:
+                    parent_stmt = parent_stmt.with_for_update()
+                parent_meta = session.execute(parent_stmt).scalar_one_or_none()
+                if parent_meta is None:
+                    raise ConversationNotFoundError(
+                        f"parent conversation {parent_conversation_id!r} does not exist"
+                    )
+                meta_row.profile_id = parent_meta.profile_id
             session.add(agent_row)
             session.add(meta_row)
             session.flush()
 
         return _created_session_from_rows(conversation_row, meta_row, agent_row, labels)
 
+    @legacy_project_membership_guard()
     def fork_conversation(
         self,
         source_conversation_id: str,
@@ -3476,6 +3747,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         presentation_labels: dict[str, str] | None = None,
         up_to_response_id: str | None = None,
         project_id: str | None = None,
+        profile_id: str | None = None,
     ) -> Conversation:
         """
         Deep-copy a conversation and its items into a new conversation.
@@ -3624,6 +3896,7 @@ class SqlAlchemyConversationStore(ConversationStore):
             presentation_labels=presentation_labels,
             up_to_response_id=up_to_response_id,
             project_id=project_id,
+            profile_id=profile_id,
         )
 
     def _fork_conversation_with_id(
@@ -3651,6 +3924,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         presentation_labels: dict[str, str] | None = None,
         up_to_response_id: str | None = None,
         project_id: str | None = None,
+        profile_id: str | None = None,
     ) -> Conversation:
         """Body of :meth:`fork_conversation` under a caller-supplied
         ``conversation_id``. The public method generates a fresh id; this seam
@@ -3932,6 +4206,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                 # First-class project membership, resolved by the caller
                 # (None = unfiled).
                 project_id=project_id,
+                profile_id=profile_id,
             )
 
         # Write fork metadata (and cloned agent if any) to the Omnigent DB.
@@ -4123,6 +4398,11 @@ class SqlAlchemyConversationStore(ConversationStore):
             )
 
     async def delete_conversation(self, conversation_id: str) -> bool:
+        """Delete a conversation while excluding legacy project adoption."""
+        with legacy_project_membership_guard():
+            return self._delete_conversation_locked(conversation_id)
+
+    def _delete_conversation_locked(self, conversation_id: str) -> bool:
         """
         Delete a conversation and all of its descendants, cleaning up
         every related row explicitly (no DB-level CASCADE).

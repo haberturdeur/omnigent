@@ -82,6 +82,7 @@ from omnigent.runtime import (
 )
 from omnigent.server._runner_ws_tunnel import WrongReplicaWSError
 from omnigent.server.auth import LEVEL_OWNER, LEVEL_READ, AuthProvider
+from omnigent.server.profile_protection import PROFILE_UNLOCK_HEADER, profile_is_accessible
 from omnigent.server.routes._auth_helpers import require_access
 from omnigent.stores import ConversationStore
 from omnigent.stores.permission_store import PermissionStore
@@ -97,6 +98,22 @@ _logger = logging.getLogger(__name__)
 _WS_CLOSE_TERMINAL_NOT_FOUND: Final[int] = WS_CLOSE_TERMINAL_NOT_FOUND
 _WS_CLOSE_INTERNAL_ERROR: Final[int] = WS_CLOSE_INTERNAL_ERROR
 _WS_CLOSE_WRONG_REPLICA: Final[int] = WS_CLOSE_WRONG_REPLICA
+_PROFILE_UNLOCK_WS_PROTOCOL_PREFIX: Final[str] = "omnigent.profile-unlock."
+
+
+def _profile_unlock_from_websocket(websocket: WebSocket) -> str | None:
+    """Read a private-profile bearer from a header or browser WS protocol."""
+    header_token = websocket.headers.get(PROFILE_UNLOCK_HEADER)
+    if header_token:
+        return header_token
+    protocols = websocket.headers.get("sec-websocket-protocol", "")
+    for protocol in protocols.split(","):
+        candidate = protocol.strip()
+        if candidate.startswith(_PROFILE_UNLOCK_WS_PROTOCOL_PREFIX):
+            token = candidate.removeprefix(_PROFILE_UNLOCK_WS_PROTOCOL_PREFIX)
+            if token:
+                return token
+    return None
 
 
 def create_terminal_attach_router(
@@ -202,6 +219,13 @@ def create_terminal_attach_router(
                     async with runner_cm as runner_ws:
                         await _shuttle_ws_frames(websocket, runner_ws)
             except _RunnerWSClosed as closed:
+                _logger.info(
+                    "Runner terminal attach closed: session=%s terminal=%s code=%s reason=%s",
+                    session_id,
+                    terminal_id,
+                    closed.code,
+                    closed.reason,
+                )
                 code = (
                     closed.code
                     if closed.code and closed.code >= 1000
@@ -212,7 +236,12 @@ def create_terminal_attach_router(
                         code=code,
                         reason=closed.reason or "",
                     )
-            except Exception:  # noqa: BLE001
+            except Exception:
+                _logger.exception(
+                    "Runner terminal attach proxy failed: session=%s terminal=%s",
+                    session_id,
+                    terminal_id,
+                )
                 with contextlib.suppress(RuntimeError):
                     await websocket.close(
                         code=_WS_CLOSE_INTERNAL_ERROR,
@@ -303,9 +332,31 @@ async def _authorize_terminal_attach(
         auth is misconfigured, the caller is unauthenticated, or the
         caller lacks the required level for the requested mode.
     """
+    if conversation_store is None:
+        if permission_store is None:
+            return
+        raise WebSocketException(
+            code=status.WS_1008_POLICY_VIOLATION,
+            reason="terminal attach authorization is not configured",
+        )
+
+    conversation = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+
     if permission_store is None:
+        if (
+            conversation is not None
+            and conversation.profile_id is not None
+            and not profile_is_accessible(
+                conversation.profile_id,
+                _profile_unlock_from_websocket(websocket),
+            )
+        ):
+            raise WebSocketException(
+                code=status.WS_1008_POLICY_VIOLATION,
+                reason="not authorized",
+            )
         return
-    if auth_provider is None or conversation_store is None:
+    if auth_provider is None:
         raise WebSocketException(
             code=status.WS_1008_POLICY_VIOLATION,
             reason="terminal attach authorization is not configured",
@@ -338,6 +389,24 @@ async def _authorize_terminal_attach(
             code=status.WS_1008_POLICY_VIOLATION,
             reason="not authorized",
         ) from exc
+    direct_level = await asyncio.to_thread(
+        permission_store.get_permission_level,
+        user_id,
+        session_id,
+    )
+    caller_is_owner = direct_level is None or direct_level >= LEVEL_OWNER
+    if (
+        caller_is_owner
+        and conversation is not None
+        and conversation.profile_id is not None
+        and not profile_is_accessible(
+            conversation.profile_id, _profile_unlock_from_websocket(websocket)
+        )
+    ):
+        raise WebSocketException(
+            code=status.WS_1008_POLICY_VIOLATION,
+            reason="not authorized",
+        )
 
 
 class _RunnerWSClosed(Exception):

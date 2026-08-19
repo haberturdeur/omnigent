@@ -114,6 +114,107 @@ def test_import_command_sends_force_override(tmp_path: Path) -> None:
     assert "conv_replaced" in result.output
 
 
+@respx.mock
+def test_import_command_targets_named_profile(tmp_path: Path) -> None:
+    """The CLI resolves a profile name and sends its id with the import."""
+    session_id = "a1b2c3d4-1234-5678-9abc-def012345680"
+    _write_claude_transcript(tmp_path, session_id, text="profile import")
+    respx.get(f"{_BASE}/v1/profiles").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "id": "profile_work",
+                        "name": "Work",
+                        "protection": {},
+                    }
+                ]
+            },
+        )
+    )
+    route = respx.post(f"{_BASE}/v1/imports").mock(
+        return_value=httpx.Response(
+            201,
+            json={"session_id": "conv_profile", "status": "imported", "item_count": 1},
+        )
+    )
+
+    with patch("omnigent.cli._resolve_attach_server", return_value=_BASE):
+        result = CliRunner().invoke(
+            cli,
+            [
+                "import",
+                "--harness",
+                "claude",
+                "--session",
+                session_id,
+                "--profile",
+                "Work",
+            ],
+            env={"HOME": str(tmp_path)},
+        )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(route.calls.last.request.content)["profile_id"] == "profile_work"
+
+
+@respx.mock
+def test_import_command_unlocks_private_profile_without_echoing_passcode(tmp_path: Path) -> None:
+    """A private destination is unlocked via a hidden prompt for this import."""
+    session_id = "a1b2c3d4-1234-5678-9abc-def012345681"
+    _write_claude_transcript(tmp_path, session_id, text="private profile import")
+    respx.get(f"{_BASE}/v1/profiles").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "id": "profile_private",
+                        "name": "Private",
+                        "protection": {"lock": "passcode"},
+                    }
+                ]
+            },
+        )
+    )
+    respx.post(f"{_BASE}/v1/profiles/profile_private/unlock").mock(
+        return_value=httpx.Response(200, json={"token": "unlock-bearer"})
+    )
+    route = respx.post(f"{_BASE}/v1/imports").mock(
+        return_value=httpx.Response(
+            201,
+            json={"session_id": "conv_private", "status": "imported", "item_count": 1},
+        )
+    )
+    relock = respx.delete(f"{_BASE}/v1/profiles/profile_private/unlock").mock(
+        return_value=httpx.Response(200, json={"locked": True})
+    )
+
+    with patch("omnigent.cli._resolve_attach_server", return_value=_BASE):
+        result = CliRunner().invoke(
+            cli,
+            [
+                "import",
+                "--harness",
+                "claude",
+                "--session",
+                session_id,
+                "--profile",
+                "Private",
+            ],
+            input="correct horse battery staple\n",
+            env={"HOME": str(tmp_path)},
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "correct horse battery staple" not in result.output
+    request = route.calls.last.request
+    assert request.headers["X-Omnigent-Profile-Unlock"] == "unlock-bearer"
+    assert json.loads(request.content)["profile_id"] == "profile_private"
+    assert relock.called
+
+
 def test_import_command_rejects_cursor() -> None:
     """The import command rejects sources without a supported adapter."""
     result = CliRunner().invoke(

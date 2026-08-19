@@ -131,6 +131,22 @@ def test_read_oversize_file_is_capped_and_flagged(tmp_path: Path, monkeypatch) -
     assert result["bytes"] == 8
 
 
+def test_download_read_uses_explicit_larger_cap_and_no_line_limit(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Download reads bypass preview caps without becoming unbounded."""
+    monkeypatch.setattr("omnigent.workspace_fs._MAX_READ_BYTES", 8)
+    content = b"one\ntwo\nthree\n"
+    (tmp_path / "full.txt").write_bytes(content)
+    reader = WorkspaceReader(tmp_path)
+
+    result = reader.list_or_read("full.txt", max_bytes=32, download=True)
+
+    assert result["truncated"] is False
+    assert result["bytes"] == len(content)
+    assert result["content"] == content.decode()
+
+
 def test_oversize_text_split_on_codepoint_stays_text(tmp_path: Path, monkeypatch) -> None:
     """A text file truncated mid-codepoint still serves as UTF-8, not base64.
 

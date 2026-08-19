@@ -5,7 +5,9 @@ import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 
@@ -25,13 +27,17 @@ import android.webkit.WebViewClient
  */
 class OmnigentWebViewClient(
     private val pinnedOrigin: () -> String?,
+    private val pinnedServerUrl: () -> String?,
     private val shouldInjectBridgeAtPageReady: () -> Boolean,
     private val onPageReady: (url: String?) -> Unit,
     private val onLoginRequired: () -> Unit,
+    private val onMainFrameError: () -> Unit = {},
+    private val bridgeScriptSource: () -> String = { NativeBridgeScript.source },
 ) : WebViewClient() {
     // Bare-root -> /omnigent bounces since the last app page loaded; see
     // workspaceRootTarget for why they're capped.
     private var rootBounces = 0
+    private var mainFrameLoadFailed = false
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -45,6 +51,7 @@ class OmnigentWebViewClient(
         val origin = originOf(url)
         val scheme = url?.let { Uri.parse(it).scheme?.lowercase() }
         val pinned = pinnedOrigin()
+        if (isWithinServerBase(url, pinnedServerUrl())) mainFrameLoadFailed = false
 
         // A real http(s) navigation to a foreign origin means the server bounced
         // us to the IdP and shouldOverrideUrlLoading didn't catch the redirect.
@@ -71,9 +78,17 @@ class OmnigentWebViewClient(
         // Databricks login chain hands the session back (a form POST landing on
         // the workspace root). onPageStarted sees every main-frame load.
         if (origin == pinned) {
-            val target = workspaceRootTarget(url) ?: return
-            view.stopLoading()
-            bounce(view, target)
+            val target = workspaceRootTarget(url)
+            if (target != null) {
+                view.stopLoading()
+                bounce(view, target)
+                return
+            }
+            if (!isWithinServerBase(url, pinnedServerUrl())) {
+                view.stopLoading()
+                mainFrameLoadFailed = true
+                onMainFrameError()
+            }
         }
     }
 
@@ -91,8 +106,12 @@ class OmnigentWebViewClient(
     ) {
         super.doUpdateVisitedHistory(view, url, isReload)
         if (originOf(url) != pinnedOrigin()) return
-        val target = workspaceRootTarget(url) ?: return
-        bounce(view, target)
+        val target = workspaceRootTarget(url)
+        if (target != null) {
+            bounce(view, target)
+        } else if (!isWithinServerBase(url, pinnedServerUrl())) {
+            pinnedServerUrl()?.let { bounce(view, it) }
+        }
     }
 
     override fun onPageFinished(
@@ -100,10 +119,10 @@ class OmnigentWebViewClient(
         url: String?,
     ) {
         super.onPageFinished(view, url)
-        val onPinnedOrigin = originOf(url) == pinnedOrigin()
+        val onPinnedServer = isWithinServerBase(url, pinnedServerUrl())
         // An app page loaded, so the mount works: re-arm the bounce budget for
         // the next time the user lands back on the workspace root.
-        if (onPinnedOrigin && databricksWorkspaceUiUrl(url) == null) rootBounces = 0
+        if (onPinnedServer && databricksWorkspaceUiUrl(url) == null) rootBounces = 0
         // Databricks workspace-hosted Omnigent renders inside the workspace's
         // top-nav chrome (the SPA is a workspace page). Hide it by overlaying
         // Omnigent's own root — see [WorkspaceChromeScript], which also explains why
@@ -111,14 +130,55 @@ class OmnigentWebViewClient(
         // on every full load (a server switch is a fresh document); the SPA's
         // client-side routing keeps the same document, so the injected stylesheet
         // persists across in-app navigation.
-        if (onPinnedOrigin) {
+        if (onPinnedServer) {
             view.evaluateJavascript(WorkspaceChromeScript.source, null)
         }
-        if (onPinnedOrigin && shouldInjectBridgeAtPageReady()) {
-            view.evaluateJavascript(NativeBridgeScript.source) { onPageReady(url) }
+        if (!onPinnedServer || mainFrameLoadFailed) return
+        if (shouldInjectBridgeAtPageReady()) {
+            view.evaluateJavascript(bridgeScriptSource()) { onPageReady(url) }
             return
         }
         onPageReady(url)
+    }
+
+    override fun onReceivedError(
+        view: WebView,
+        request: WebResourceRequest,
+        error: WebResourceError,
+    ) {
+        super.onReceivedError(view, request, error)
+        handleMainFrameError(request.isForMainFrame, request.url.toString())
+    }
+
+    override fun onReceivedHttpError(
+        view: WebView,
+        request: WebResourceRequest,
+        errorResponse: WebResourceResponse,
+    ) {
+        super.onReceivedHttpError(view, request, errorResponse)
+        handleMainFrameHttpError(
+            request.isForMainFrame,
+            request.url.toString(),
+            errorResponse.statusCode,
+        )
+    }
+
+    internal fun handleMainFrameHttpError(
+        isForMainFrame: Boolean,
+        url: String,
+        statusCode: Int,
+    ) {
+        if (statusCode >= 400) handleMainFrameError(isForMainFrame, url)
+    }
+
+    internal fun handleMainFrameError(
+        isForMainFrame: Boolean,
+        url: String,
+    ) {
+        if (isForMainFrame && isWithinServerBase(url, pinnedServerUrl())) {
+            mainFrameLoadFailed = true
+            onMainFrameError()
+        }
     }
 
     override fun shouldOverrideUrlLoading(
@@ -143,9 +203,12 @@ class OmnigentWebViewClient(
         val origin = originOf(url.toString())
         val pinned = pinnedOrigin()
         if (origin == pinned) {
-            val target = workspaceRootTarget(url.toString()) ?: return false
-            bounce(view, target)
-            return true
+            val target = workspaceRootTarget(url.toString())
+            if (target != null) {
+                bounce(view, target)
+                return true
+            }
+            return !isWithinServerBase(url.toString(), pinnedServerUrl())
         }
 
         authLog("off-origin nav $origin gesture=${request.hasGesture()}")

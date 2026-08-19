@@ -2027,6 +2027,35 @@ async def test_replay_dead_letters_on_startup_reposts_proven_undelivered(
 
 
 @pytest.mark.asyncio
+async def test_replay_dead_letters_on_startup_reposts_concealed_private_profile_404(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bound runner can recover records rejected while profile auth was absent."""
+    fwd.append_dead_letter(
+        tmp_path,
+        session_id="private_profile_session",
+        event_type="external_conversation_item",
+        payload={"item_type": "message"},
+        reason="http 404",
+        delivered_ambiguous=False,
+        http_status=404,
+        transport_error=None,
+    )
+
+    async def _ok_inner(client, session_id, *, event_type, data, max_attempts, timeout):
+        del client, session_id, event_type, data, max_attempts, timeout
+        return fwd._PostResult(
+            response=httpx.Response(202, request=httpx.Request("POST", "http://test"))
+        )
+
+    monkeypatch.setattr(fwd, "_post_session_event_inner", _ok_inner)
+
+    await fwd._replay_dead_letters_on_startup(MagicMock(), tmp_path)
+
+    assert not (tmp_path / "dead_letter.jsonl").exists()
+
+
+@pytest.mark.asyncio
 async def test_replay_dead_letters_on_startup_skips_ambiguous(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2681,7 +2710,6 @@ def test_settle_timeout_tracks_slowest_configured_server(tmp_path: Path) -> None
 
     _write_session_config(tmp_path, '[mcp_servers.fast]\ncommand = "x"\n')
     assert fwd._mcp_startup_settle_timeout_seconds(tmp_path) == 25.0
-
     _write_session_config(
         tmp_path,
         '[mcp_servers.slow]\ncommand = "y"\nstartup_timeout_sec = 100000\n',

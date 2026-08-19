@@ -12,6 +12,9 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 
 from omnigent.errors import ErrorCode, OmnigentError
+from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
+from omnigent.stores.profile_store.sqlalchemy_store import SqlAlchemyProfileStore
+from omnigent.stores.project_store import ProjectMembershipChangedError
 from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
 
 
@@ -151,43 +154,30 @@ def test_same_name_allowed_across_owners(store: SqlAlchemyProjectStore) -> None:
 
 
 def test_duplicate_name_rejected_for_null_owner(store: SqlAlchemyProjectStore) -> None:
-    """Single-user mode (NULL owner) enforces name uniqueness in the store.
-
-    ``_name_taken`` is the sole guard for every owner, NULL included — no unique
-    index backs it.
-    """
+    """Single-user mode (NULL owner) enforces name uniqueness in the store."""
     store.create(_uid("p1"), "Solo", None)
     with pytest.raises(OmnigentError) as exc:
         store.create(_uid("p2"), "Solo", None)
     assert exc.value.code == ErrorCode.ALREADY_EXISTS
 
 
-def test_duplicate_name_lands_when_precheck_is_bypassed(
+def test_duplicate_name_constraint_closes_precheck_race(
     store: SqlAlchemyProjectStore,
 ) -> None:
-    """A duplicate name is accepted once ``_name_taken`` is bypassed.
-
-    No unique index covers (workspace_id, user_id, name), so the pre-check is
-    the only guard and a concurrent create racing past it lands. Pins that
-    accepted cost: both rows exist, each addressable by its own id.
-
-    Monkeypatching ``_name_taken`` to always-miss simulates two concurrent
-    creates both passing the check.
-    """
+    """The database rejects a duplicate after two writers pass the pre-check."""
     store.create(_uid("p1"), "Dup", "alice@example.com")
     store._name_taken = lambda *a, **k: False  # type: ignore[method-assign]
-    store.create(_uid("p2"), "Dup", "alice@example.com")
-
-    assert [p.name for p in store.list(user_id="alice@example.com")] == ["Dup", "Dup"]
-    assert store.get(_uid("p1"), user_id="alice@example.com") is not None
-    assert store.get(_uid("p2"), user_id="alice@example.com") is not None
+    with pytest.raises(OmnigentError) as exc:
+        store.create(_uid("p2"), "Dup", "alice@example.com")
+    assert exc.value.code == ErrorCode.ALREADY_EXISTS
+    assert [p.name for p in store.list(user_id="alice@example.com")] == ["Dup"]
 
 
 def test_primary_key_collision_is_not_masked(store: SqlAlchemyProjectStore) -> None:
     """Reusing an id surfaces as ``IntegrityError``, not ``ALREADY_EXISTS``.
 
-    The PK is the only remaining constraint on this table, and the store must
-    not dress its violation up as a name collision.
+    The store must not dress an unrelated constraint violation up as a name
+    collision.
     """
     store.create(_uid("p1"), "Original", "alice@example.com")
     store._name_taken = lambda *a, **k: False  # type: ignore[method-assign]
@@ -326,6 +316,64 @@ def test_update_scoped_to_owner(store: SqlAlchemyProjectStore) -> None:
     assert updated is None
     # Unchanged for the real owner.
     assert store.get(_uid("p1"), user_id="alice@example.com").name == "Alice Project"
+
+
+def test_move_rejects_members_added_after_snapshot(
+    store: SqlAlchemyProjectStore,
+    db_uri: str,
+) -> None:
+    """A stale pre-stop snapshot cannot omit a concurrently filed session."""
+    owner = "alice@example.com"
+    source_profile = _uid("source-profile")
+    destination_profile = _uid("destination-profile")
+    profiles = SqlAlchemyProfileStore(db_uri)
+    profiles.create(source_profile, "Source", owner)
+    profiles.create(destination_profile, "Destination", owner)
+    project = store.create(_uid("moving-project"), "Moving", owner, profile_id=source_profile)
+    conversations = SqlAlchemyConversationStore(db_uri)
+    original = conversations.create_conversation(profile_id=source_profile)
+    conversations.set_conversation_project(original.id, project.id)
+    newcomer = conversations.create_conversation(profile_id=source_profile)
+    conversations.set_conversation_project(newcomer.id, project.id)
+
+    with pytest.raises(ProjectMembershipChangedError):
+        store.update_with_sessions(
+            project.id,
+            user_id=owner,
+            expected_profile_id=source_profile,
+            destination_profile_id=destination_profile,
+            expected_member_ids=(original.id,),
+        )
+
+    unchanged = store.get(project.id, user_id=owner)
+    assert unchanged is not None and unchanged.profile_id == source_profile
+
+
+def test_exact_member_snapshot_ignores_same_name_project_in_other_profile(
+    store: SqlAlchemyProjectStore,
+    db_uri: str,
+) -> None:
+    """Pre-move runner selection keys on project identity, not its display name."""
+    owner = "alice@example.com"
+    first_profile = _uid("first-profile")
+    second_profile = _uid("second-profile")
+    profiles = SqlAlchemyProfileStore(db_uri)
+    profiles.create(first_profile, "First", owner)
+    profiles.create(second_profile, "Second", owner)
+    first = store.create(_uid("first-project"), "Same", owner, profile_id=first_profile)
+    second = store.create(_uid("second-project"), "Same", owner, profile_id=second_profile)
+    conversations = SqlAlchemyConversationStore(db_uri)
+    first_member = conversations.create_conversation(profile_id=first_profile)
+    second_member = conversations.create_conversation(profile_id=second_profile)
+    conversations.set_conversation_project(first_member.id, first.id)
+    conversations.set_conversation_project(second_member.id, second.id)
+
+    member_ids = conversations.get_project_member_session_ids(
+        first.id,
+        expected_profile_id=first_profile,
+    )
+
+    assert member_ids == (first_member.id,)
 
 
 def test_update_rejects_duplicate_name(store: SqlAlchemyProjectStore) -> None:

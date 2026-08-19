@@ -729,6 +729,7 @@ from omnigent.stores.conversation_store import (
 )
 from omnigent.stores.file_store import FileStore
 from omnigent.stores.permission_store import PermissionStore
+from omnigent.stores.profile_store import ProfileStore
 from omnigent.stores.project_store import ProjectStore
 from omnigent.telemetry import emit as _tel_emit
 from omnigent.telemetry.events import SessionDeletedEvent as _TelSessionDeletedEvent
@@ -794,6 +795,7 @@ def create_sessions_router(
     runner_exit_reports: RunnerExitReports | None = None,
     host_registry: HostRegistry | None = None,
     project_store: ProjectStore | None = None,
+    profile_store: ProfileStore | None = None,
     background_title_coordinator: BackgroundSessionTitleCoordinator | None = None,
 ) -> APIRouter:
     """
@@ -893,6 +895,7 @@ def create_sessions_router(
         runner_exit_reports=runner_exit_reports,
         host_registry=host_registry,
         project_store=project_store,
+        profile_store=profile_store,
         background_title_coordinator=background_title_coordinator,
     )
 

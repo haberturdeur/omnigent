@@ -82,7 +82,7 @@ from omnigent.spec.types import RetryPolicy
 from ._subprocess_lifecycle import close_subprocess_transport
 from .async_utils import run_sync_on_thread
 from .databricks_executor import _read_databrickscfg
-from .datamodel import OSEnvSandboxSpec, OSEnvSpec
+from .datamodel import OSEnvSpec
 from .executor import (
     Executor,
     ExecutorConfig,
@@ -1447,9 +1447,6 @@ def _try_sandbox_pi(
         prune.
     """
     if os_env is None:
-        return SandboxedPiCli(launch_path=pi_path, sandboxed=False)
-    sandbox_spec = os_env.sandbox or OSEnvSandboxSpec()
-    if sandbox_spec.type == "none":
         return SandboxedPiCli(launch_path=pi_path, sandboxed=False)
     try:
         import pathlib

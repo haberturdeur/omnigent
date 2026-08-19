@@ -38,6 +38,15 @@ function terminalFontOptions({ sizePx, family, weight }: CodeFont) {
 // replica (the ``?omnigent_slice_key=`` doesn't match where the tunnel lives).
 // Mirrors ``ws_common.py`` ``WS_CLOSE_WRONG_REPLICA``.
 export const WS_CLOSE_WRONG_REPLICA = 4400;
+const PROFILE_UNLOCK_WS_PROTOCOL_PREFIX = "omnigent.profile-unlock.";
+
+export function terminalWebSocketProtocols(
+  profileUnlockToken: string | null,
+): string[] | undefined {
+  return profileUnlockToken
+    ? [`${PROFILE_UNLOCK_WS_PROTOCOL_PREFIX}${profileUnlockToken}`]
+    : undefined;
+}
 
 /**
  * Return an xterm `ITheme` object matched to the app's light or dark palette.
@@ -532,6 +541,8 @@ export class TerminalSession {
    * :param clipboardEnabled: Whether tmux copies may write the local clipboard.
    * :param onClipboardRequest: Receives validated tmux copy-mode text.
    * :param focusOnConnect: Whether to grab keyboard focus on WS-open.
+   * :param profileUnlockToken: In-memory private-profile bearer sent as a
+   *     WebSocket subprotocol on the Omnigent relay path.
    */
   constructor(
     container: HTMLElement,
@@ -543,6 +554,7 @@ export class TerminalSession {
     clipboardEnabled = true,
     onClipboardRequest?: TerminalClipboardListener,
     focusOnConnect = true,
+    profileUnlockToken: string | null = null,
   ) {
     this.clipboardEnabled = clipboardEnabled;
     this.focusOnConnect = focusOnConnect;
@@ -584,7 +596,8 @@ export class TerminalSession {
       this.term.resize(80, 24);
     }
 
-    this.ws = new WebSocket(url);
+    const protocols = terminalWebSocketProtocols(profileUnlockToken);
+    this.ws = protocols ? new WebSocket(url, protocols) : new WebSocket(url);
     // Default is Blob, which forces an async read per chunk. ArrayBuffer
     // keeps the path synchronous and matches xterm.js's preferred input.
     this.ws.binaryType = "arraybuffer";
@@ -681,7 +694,6 @@ export class TerminalSession {
       if (e.type === "keydown") {
         e.preventDefault();
         onInput?.();
-        this.lastUserInputAt = performance.now();
         if (this.ws.readyState === WebSocket.OPEN) {
           this.ws.send(INPUT_ENCODER.encode(payload));
         }

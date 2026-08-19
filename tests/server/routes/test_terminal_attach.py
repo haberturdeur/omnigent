@@ -100,12 +100,13 @@ class _StubConversationStore:
     def get_conversation(self, conversation_id: str) -> Conversation | None:
         return self._conversations.get(conversation_id)
 
-    def add(self, conversation_id: str) -> None:
+    def add(self, conversation_id: str, *, profile_id: str | None = None) -> None:
         self._conversations[conversation_id] = Conversation(
             id=conversation_id,
             created_at=0,
             updated_at=0,
             root_conversation_id=conversation_id,
+            profile_id=profile_id,
         )
 
 
@@ -333,6 +334,81 @@ class _FakeRunnerWSFactory:
                 return None
 
         return _CM(self._conn)
+
+
+async def test_private_terminal_accepts_unlock_websocket_subprotocol(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Browser terminal attaches can authorize an unlocked private profile."""
+    from omnigent.server.routes import terminal_attach
+
+    conv_store = _StubConversationStore()
+    conv_store.add("conv_private", profile_id="profile-private")
+    seen_tokens: list[str | None] = []
+
+    def _profile_is_accessible(profile_id: str, token: str | None) -> bool:
+        assert profile_id == "profile-private"
+        seen_tokens.append(token)
+        return token == "unlock-token"
+
+    monkeypatch.setattr(terminal_attach, "profile_is_accessible", _profile_is_accessible)
+    app = FastAPI()
+    app.include_router(
+        create_terminal_attach_router(
+            conversation_store=conv_store,  # type: ignore[arg-type]
+        ),
+        prefix="/v1",
+    )
+    conn = _FakeRunnerWSConn(outgoing=[b"private-output"])
+    factory = _FakeRunnerWSFactory(conn)
+    set_runner_ws_factory(factory)
+
+    with TestClient(app).websocket_connect(
+        "/v1/sessions/conv_private/resources/terminals/terminal_codex_main/attach",
+        subprotocols=["omnigent.profile-unlock.unlock-token"],
+    ) as ws:
+        assert ws.receive_bytes() == b"private-output"
+
+    assert seen_tokens == ["unlock-token"]
+    assert len(factory.calls) == 1
+
+
+async def test_private_terminal_allows_direct_read_grantee_without_owner_unlock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from omnigent.server.routes import terminal_attach
+
+    conv_store = _StubConversationStore()
+    conv_store.add("conv_private", profile_id="profile-private")
+    permissions = _StubPermissionStore()
+    permissions.add_grant("owner@example.com", "conv_private", LEVEL_OWNER)
+    permissions.add_grant("reader@example.com", "conv_private", LEVEL_READ)
+    monkeypatch.setattr(terminal_attach, "profile_is_accessible", lambda *_args: False)
+    app = FastAPI()
+    app.include_router(
+        create_terminal_attach_router(
+            auth_provider=UnifiedAuthProvider(source="header"),
+            permission_store=permissions,  # type: ignore[arg-type]
+            conversation_store=conv_store,  # type: ignore[arg-type]
+        ),
+        prefix="/v1",
+    )
+    factory = _FakeRunnerWSFactory(_FakeRunnerWSConn(outgoing=[b"private-output"]))
+    set_runner_ws_factory(factory)
+
+    with TestClient(app).websocket_connect(
+        "/v1/sessions/conv_private/resources/terminals/terminal_codex_main/attach?read_only=true",
+        headers={"X-Forwarded-Email": "reader@example.com"},
+    ) as ws:
+        assert ws.receive_bytes() == b"private-output"
+
+    with pytest.raises(WebSocketDisconnect) as exc_info:
+        with TestClient(app).websocket_connect(
+            "/v1/sessions/conv_private/resources/terminals/terminal_codex_main/attach?read_only=true",
+            headers={"X-Forwarded-Email": "owner@example.com"},
+        ):
+            pass
+    assert exc_info.value.code == 1008
 
 
 async def test_attach_terminal_rejects_unauthorized_user_before_runner_proxy() -> None:

@@ -49,6 +49,14 @@ from omnigent.runtime.agent_cache import AgentCache
 from omnigent.server.auth import AuthProvider
 from omnigent.server.feature_flags import Feature, FeatureFlags, resolve_feature_flags
 from omnigent.server.host_registry import HostConnection, HostRegistry
+from omnigent.server.profile_protection import (
+    PROFILE_UNLOCK_HEADER,
+    get_profile_protection_by_id,
+    profile_is_accessible,
+    profile_isolation_snapshot,
+    protected_profile_for_workspace,
+    workspace_belongs_to_profile,
+)
 from omnigent.server.routes._auth_helpers import require_user
 from omnigent.server.routes._host_launch import resolve_host_launch
 from omnigent.server.schemas import SessionGitOptions
@@ -766,6 +774,22 @@ def create_hosts_router(
             permission_store=permission_store,
         )
         conn = target.conn
+        protected_profile_id = (
+            target.conv.profile_id
+            if target.conv.profile_id is not None
+            and get_profile_protection_by_id(target.conv.profile_id) is not None
+            else None
+        )
+        if protected_profile_id is not None and not profile_is_accessible(
+            protected_profile_id,
+            request.headers.get(PROFILE_UNLOCK_HEADER),
+        ):
+            raise OmnigentError("Session not found", code=ErrorCode.NOT_FOUND)
+        if protected_profile_id is not None and (agent_store is None or agent_cache is None):
+            raise OmnigentError(
+                "A private profile runner requires host-verified workspace canonicalization.",
+                code=ErrorCode.RUNNER_UNAVAILABLE,
+            )
 
         # W6: validate the requested workspace against the agent's
         # os_env.cwd sandbox boundary BEFORE binding — the same check
@@ -798,6 +822,19 @@ def create_hosts_router(
                 "launch_runner: workspace boundary validation skipped for "
                 "session %s (router built without an agent cache)",
                 body.session_id,
+            )
+
+        if protected_profile_id is not None and not workspace_belongs_to_profile(
+            protected_profile_id,
+            workspace,
+            host_id=host_id,
+        ):
+            # Reject host realpaths that disagree with the registered remote
+            # root; the server cannot safely canonicalize a remote filesystem.
+            raise OmnigentError(
+                "A private profile's host-verified workspace must be inside "
+                "one of its protected roots.",
+                code=ErrorCode.INVALID_INPUT,
             )
 
         # Optional git worktree: when the caller asks to branch, create a
@@ -956,6 +993,10 @@ def create_hosts_router(
         harness: str | None = None
         if agent_store is not None and agent_cache is not None:
             harness = await _resolve_agent_harness(target.conv, agent_store, agent_cache)
+        isolation_generation, isolation_masks = profile_isolation_snapshot(
+            workspace,
+            host_id=host_id,
+        )
         launch_frame = encode_host_frame(
             HostLaunchRunnerFrame(
                 request_id=request_id,
@@ -963,6 +1004,9 @@ def create_hosts_router(
                 workspace=workspace,
                 session_id=body.session_id,
                 harness=harness,
+                isolation_generation=isolation_generation,
+                isolation_host_id=host_id,
+                isolation_masks=[str(path) for path in isolation_masks],
             )
         )
         try:
@@ -1002,6 +1046,21 @@ def create_hosts_router(
             raise HTTPException(
                 status_code=502,
                 detail=f"host failed to launch runner: {result.get('error')}",
+            )
+
+        from omnigent.server.routes._sessions.helpers import _stop_stale_host_launch
+
+        if await _stop_stale_host_launch(
+            session_id=body.session_id,
+            host_id=host_id,
+            runner_id=runner_id,
+            launch_generation=isolation_generation,
+            host_registry=host_registry,
+        ):
+            await _rollback_failed_launch()
+            raise HTTPException(
+                status_code=409,
+                detail="private-profile protection changed during runner launch; retry",
             )
 
         return {
@@ -1139,6 +1198,12 @@ def create_hosts_router(
                 status_code=400,
                 detail="path must not contain NUL bytes",
             )
+        if not path.startswith("~"):
+            protected_profile = protected_profile_for_workspace(path, host_id=host_id)
+            if protected_profile is not None and not profile_is_accessible(
+                protected_profile, request.headers.get(PROFILE_UNLOCK_HEADER)
+            ):
+                raise HTTPException(status_code=404, detail="path not found")
 
         conn = host_registry.get(host.host_id)
         if conn is None:
@@ -1171,10 +1236,24 @@ def create_hosts_router(
 
         # Shape mirrors GET /v1/sessions/{id}/resources/environments/default/filesystem
         # so the Web UI can reuse fetchWorkspaceDirectory etc.
+        entries = result.get("entries", [])
+        visible_entries = [
+            entry
+            for entry in entries
+            if not isinstance(entry, dict)
+            or not isinstance(entry.get("path"), str)
+            or (protected_profile_for_workspace(entry["path"], host_id=host_id) is None)
+            or profile_is_accessible(
+                protected_profile_for_workspace(entry["path"], host_id=host_id) or "",
+                request.headers.get(PROFILE_UNLOCK_HEADER),
+            )
+        ]
         return {
             "object": "list",
-            "data": result.get("entries", []),
-            "has_more": bool(result.get("has_more", False)),
+            "data": visible_entries,
+            "has_more": bool(result.get("has_more", False))
+            if len(visible_entries) == len(entries)
+            else False,
         }
 
     @router.post("/hosts/{host_id}/directories")

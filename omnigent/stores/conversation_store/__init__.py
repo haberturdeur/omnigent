@@ -4,6 +4,7 @@ import hashlib
 import math
 import time
 from abc import ABC, abstractmethod
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import Any
 
@@ -316,6 +317,18 @@ def _is_addable_usage_increment(value: Any) -> bool:
     return math.isfinite(value) and value >= 0
 
 
+class ConversationProfileChangedError(RuntimeError):
+    """Raised when a session profile changes during a guarded move."""
+
+
+class ConversationProjectProfileMismatchError(RuntimeError):
+    """Raised when an individually moved session belongs to a project."""
+
+
+class ConversationTreeChangedError(RuntimeError):
+    """Raised when a session tree changes during a guarded move."""
+
+
 def apply_session_usage_delta(current: dict[str, Any], delta: dict[str, Any]) -> None:
     """
     Apply a usage *delta* to *current* in place (add semantics, nested-aware).
@@ -385,6 +398,7 @@ class ConversationStore(ABC):
         terminal_launch_args: list[str] | None = None,
         conversation_id: str | None = None,
         project_id: str | None = None,
+        profile_id: str | None = None,
     ) -> Conversation:
         """
         Create a new conversation. Generates a unique
@@ -659,6 +673,8 @@ class ConversationStore(ABC):
         pinned: bool = False,
         pinned_owner: str | None = None,
         title: str | None = None,
+        profile_id: str | None = None,
+        exclude_profile_ids: frozenset[str] | None = None,
     ) -> PagedList[Conversation]:
         """
         List conversations with cursor-based pagination.
@@ -976,6 +992,7 @@ class ConversationStore(ABC):
         self,
         accessible_by: str | None = None,
         owned_by: str | None = None,
+        profile_id: str | None = None,
     ) -> list[str]:
         """
         Return all distinct sidebar "project" names, ordered ascending.
@@ -997,6 +1014,8 @@ class ConversationStore(ABC):
             Projects are a "My sessions"-only surface, so this keeps a
             project owned by someone else — but with a session shared to
             the user — from appearing as one of the user's own folders.
+        :param profile_id: When set, restrict to projects represented by
+            sessions assigned to this profile.
         :returns: List of project names ordered alphabetically.
         """
         ...
@@ -1064,6 +1083,55 @@ class ConversationStore(ABC):
         :returns: ``True`` if a metadata row was updated; ``False`` if the
             conversation has no metadata row.
         """
+        ...
+
+    @abstractmethod
+    def move_conversations_to_profile(
+        self,
+        conversation_ids: tuple[str, ...],
+        *,
+        expected_profile_id: str | None,
+        destination_profile_id: str,
+    ) -> bool:
+        """Atomically move an unfiled session tree into another profile.
+
+        :returns: ``False`` when any requested metadata row is missing.
+        :raises ConversationProfileChangedError: If a session no longer belongs
+            to the expected source profile.
+        :raises ConversationProjectProfileMismatchError: If any session is
+            filed in a project, which must be moved as a whole.
+        """
+        ...
+
+    @abstractmethod
+    def get_project_member_session_ids(
+        self,
+        project_id: str,
+        *,
+        expected_profile_id: str | None,
+    ) -> tuple[str, ...]:
+        """Return exact first-class members in the expected profile."""
+
+        ...
+
+    @abstractmethod
+    def get_legacy_project_session_ids(
+        self,
+        project_name: str,
+        profile_id: str | None,
+        project_id: str,
+    ) -> tuple[str, ...]:
+        """Return adoptable or already-adopted sessions carrying a legacy label."""
+        ...
+
+    @abstractmethod
+    def hold_legacy_project_membership_lock(self) -> AbstractContextManager[None]:
+        """Hold the label database's cross-process legacy-membership lock."""
+        ...
+
+    @abstractmethod
+    def delete_legacy_project_labels(self, conversation_ids: tuple[str, ...]) -> None:
+        """Delete legacy project labels for a batch of adopted sessions."""
         ...
 
     @abstractmethod
@@ -1485,6 +1553,7 @@ class ConversationStore(ABC):
         parent_conversation_id: str | None = None,
         runner_id: str | None = None,
         project_id: str | None = None,
+        profile_id: str | None = None,
     ) -> CreatedSession:
         """
         Atomically create a session and its session-scoped agent.
@@ -1556,6 +1625,7 @@ class ConversationStore(ABC):
         presentation_labels: dict[str, str] | None = None,
         up_to_response_id: str | None = None,
         project_id: str | None = None,
+        profile_id: str | None = None,
     ) -> Conversation:
         """
         Deep-copy a conversation and its items into a new conversation.
@@ -1659,6 +1729,7 @@ class ConversationStore(ABC):
             unfiled. The caller resolves whether the fork keeps the
             source's project — projects are owner-private, so the route
             passes the source's id only when the forker owns it.
+        :param profile_id: Profile inherited from the source conversation.
         :returns: The newly created :class:`Conversation`.
         :raises LookupError: If no conversation with
             *source_conversation_id* exists.

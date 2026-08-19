@@ -16,7 +16,10 @@ from httpx import ASGITransport, AsyncClient
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.host.frames import (
     HostHelloFrame,
+    HostLaunchRunnerFrame,
     HostLaunchRunnerResultFrame,
+    HostStopRunnerFrame,
+    HostStopRunnerResultFrame,
     encode_host_frame,
 )
 from omnigent.server.auth import LEVEL_OWNER
@@ -85,12 +88,17 @@ def _make_hello(
 @pytest.fixture()
 def host_api_app(
     db_uri: str,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore]:
     """FastAPI app with host tunnel + REST routes and stores.
 
     :param db_uri: SQLite URI from the shared fixture.
     :returns: Tuple of (app, registry, host_store, conv_store).
     """
+    monkeypatch.setenv(
+        "OMNIGENT_PROFILE_PROTECTION_PATH", str(tmp_path / "profile-protection.json")
+    )
     return _build_host_api_app(db_uri)
 
 
@@ -571,13 +579,15 @@ async def test_launch_runner_happy_path(
 
     conv = conv_store.create_conversation(agent_id=None)
 
+    launch_frames: list[HostLaunchRunnerFrame] = []
+
     async def _respond_to_launch() -> None:
         """Read the launch frame from the host's outbound queue and respond."""
         conn = registry.get(_HOST_ID)
         assert conn is not None
         # Drain until we find the launch frame (skip pings).
 
-        from omnigent.host.frames import HostLaunchRunnerFrame, decode_host_frame
+        from omnigent.host.frames import decode_host_frame
 
         for _ in range(20):
             output = await comm.receive_output(timeout=2.0)
@@ -585,6 +595,7 @@ async def test_launch_runner_happy_path(
                 continue
             frame = decode_host_frame(output["text"])
             if isinstance(frame, HostLaunchRunnerFrame):
+                launch_frames.append(frame)
                 result = encode_host_frame(
                     HostLaunchRunnerResultFrame(
                         request_id=frame.request_id,
@@ -616,6 +627,9 @@ async def test_launch_runner_happy_path(
     assert data["status"] == "launching"
     # runner_id should be a deterministic hash of the binding token.
     assert data["runner_id"].startswith("runner_token_")
+    assert launch_frames[0].isolation_generation == 0
+    assert launch_frames[0].isolation_host_id == _HOST_ID
+    assert launch_frames[0].isolation_masks == []
 
     # Session row should have runner_id and host_id set.
     updated_conv = conv_store.get_conversation(conv.id)
@@ -624,6 +638,117 @@ async def test_launch_runner_happy_path(
         "runner_id should be written to the session row before sending the launch frame"
     )
     assert updated_conv.host_id == _HOST_ID, "host_id should be written to the session row"
+
+
+async def test_launch_runner_rejects_locked_profile_without_unlock(
+    host_api_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The host-specific launch shortcut cannot bypass a profile lock."""
+    app, registry, _hs, conv_store = host_api_app
+    comm = await _connect_host(app, registry)
+    conv = conv_store.create_conversation(agent_id=None)
+    original_resolve = resolve_host_launch
+
+    def _resolve_with_private_profile(**kwargs):
+        target = original_resolve(**kwargs)
+        target.conv.profile_id = "private"
+        return target
+
+    monkeypatch.setattr(
+        "omnigent.server.routes.hosts.resolve_host_launch", _resolve_with_private_profile
+    )
+    monkeypatch.setattr(
+        "omnigent.server.routes.hosts.get_profile_protection_by_id",
+        lambda _profile_id: object(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "omnigent.server.routes.hosts.profile_is_accessible",
+        lambda _profile_id, _token: False,
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            f"/v1/hosts/{_HOST_ID}/runners",
+            json={"session_id": conv.id, "workspace": "/tmp/test-workspace"},
+        )
+
+    assert response.status_code == 404, response.text
+    assert conv_store.get_conversation(conv.id).runner_id is None
+    await comm.send_input({"type": "websocket.disconnect", "code": 1000})
+
+
+async def test_launch_runner_rolls_back_when_protection_changes(
+    host_api_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A generation race stops the process and rejects the bound launch."""
+    app, registry, _hs, conv_store = host_api_app
+    comm = await _connect_host(app, registry)
+    conv = conv_store.create_conversation(agent_id=None)
+    monkeypatch.setattr(
+        "omnigent.server.routes.hosts.profile_isolation_snapshot",
+        lambda _workspace, *, host_id=None: (5, ()),
+    )
+    monkeypatch.setattr(
+        "omnigent.server.profile_protection.profile_protection_generation",
+        lambda: 6,
+    )
+
+    stopped: list[str] = []
+
+    async def _respond() -> None:
+        for _ in range(20):
+            output = await comm.receive_output(timeout=2.0)
+            if output["type"] != "websocket.send":
+                continue
+            from omnigent.host.frames import decode_host_frame
+
+            frame = decode_host_frame(output["text"])
+            if isinstance(frame, HostLaunchRunnerFrame):
+                await comm.send_input(
+                    {
+                        "type": "websocket.receive",
+                        "text": encode_host_frame(
+                            HostLaunchRunnerResultFrame(
+                                request_id=frame.request_id,
+                                status="launched",
+                                runner_id="runner_from_host",
+                            )
+                        ),
+                    }
+                )
+            elif isinstance(frame, HostStopRunnerFrame):
+                stopped.append(frame.runner_id)
+                await comm.send_input(
+                    {
+                        "type": "websocket.receive",
+                        "text": encode_host_frame(
+                            HostStopRunnerResultFrame(
+                                request_id=frame.request_id,
+                                status="stopped",
+                            )
+                        ),
+                    }
+                )
+                return
+        raise AssertionError("server did not stop the stale launch")
+
+    responder = asyncio.create_task(_respond())
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            f"/v1/hosts/{_HOST_ID}/runners",
+            json={"session_id": conv.id, "workspace": "/tmp/test-workspace"},
+        )
+    await responder
+
+    assert response.status_code == 409
+    assert stopped and stopped[0].startswith("runner_token_")
+    updated = conv_store.get_conversation(conv.id)
+    assert updated is not None
+    assert updated.runner_id is None
+    assert updated.host_id is None
 
 
 async def test_launch_runner_harness_not_configured_returns_412(

@@ -336,6 +336,42 @@ def test_cannot_file_into_another_owners_project(db_uri: str) -> None:
     assert snap.json()["project_id"] is None
 
 
+def test_profile_mismatch_preserves_legacy_project_label(db_uri: str) -> None:
+    """Filing validation happens before the legacy project label is cleared."""
+    _ensure_agent(db_uri)
+    conversations = SqlAlchemyConversationStore(db_uri)
+    session = conversations.create_conversation(
+        agent_id=AGENT_ID,
+        profile_id="a" * 32,
+    )
+    conversations.set_labels(
+        session.id,
+        {"omni_project": "Original", "keep": "yes"},
+    )
+    permissions = SqlAlchemyPermissionStore(db_uri)
+    permissions.ensure_user(ALICE)
+    permissions.grant(ALICE, session.id, LEVEL_OWNER)
+    project = SqlAlchemyProjectStore(db_uri).create(
+        "b" * 32,
+        "Other profile",
+        ALICE,
+        profile_id="c" * 32,
+    )
+    client = TestClient(_multi_user_app(db_uri))
+
+    response = client.patch(
+        f"/v1/sessions/{session.id}",
+        json={"project_id": project.id, "labels": {"omni_project": ""}},
+        headers=_hdr(ALICE),
+    )
+
+    assert response.status_code == 409
+    unchanged = conversations.get_conversation(session.id)
+    assert unchanged is not None
+    assert unchanged.project_id is None
+    assert unchanged.labels == {"omni_project": "Original", "keep": "yes"}
+
+
 def test_fork_of_shared_session_in_foreign_project_stays_unfiled(db_uri: str) -> None:
     """Alice forks Bob's shared session filed in Bob's project. Projects are
     owner-private, so her fork must not carry Bob's project id — a foreign id

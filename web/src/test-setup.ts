@@ -1,6 +1,25 @@
 import "@testing-library/jest-dom/vitest";
 import { vi } from "vitest";
 
+// Node 25 exposes an incomplete experimental global when no
+// --localstorage-file is configured, preventing jsdom from installing its
+// Storage implementation. Keep the test environment browser-compatible.
+if (typeof globalThis.localStorage?.clear !== "function") {
+  const storage = globalThis.sessionStorage;
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    value: storage,
+  });
+  Object.defineProperty(window, "localStorage", {
+    configurable: true,
+    value: storage,
+  });
+  Object.defineProperty(globalThis, "Storage", {
+    configurable: true,
+    value: Object.getPrototypeOf(storage).constructor,
+  });
+}
+
 // The @lobehub icon packages have broken nested-module resolution
 // under vitest; stub presentational glyphs so component modules that
 // import them can still load in tests. (The Antigravity glyph additionally

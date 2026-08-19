@@ -113,6 +113,11 @@ import type { ActiveResponse } from "./types";
 import { supportsEffortControl } from "@/lib/sessionCapabilities";
 import { claudePermissionModeFromSession } from "@/lib/claudePermissionMode";
 import { codexPlanModeFromSession } from "@/lib/codexPlanMode";
+import {
+  codexApprovalModeFromSession,
+  type CodexApprovalMode,
+  type CodexApprovalState,
+} from "@/lib/codexApprovalMode";
 import { getCurrentAuthorId } from "@/lib/identity";
 import { getOmnigentHostConfig } from "@/lib/host";
 // Routing-free emit primitive (not "@/lib/analytics", which pulls in useLocation
@@ -378,6 +383,8 @@ export interface ConversationState {
    * web toggle or native Codex TUI events. False for non-Codex sessions.
    */
   codexPlanMode: boolean;
+  /** Live Codex approval/sandbox preset for the active session. */
+  codexApprovalMode: CodexApprovalState;
   /**
    * Permission mode of a running claude-native session, e.g. ``"auto"``.
    * Hydrated from ``omnigent.claude_native.permission_mode`` on bind
@@ -766,6 +773,8 @@ export interface ChatActions {
    * active conversation.
    */
   setCodexPlanMode: (enabled: boolean) => Promise<void>;
+  /** Apply a Codex approval/sandbox preset to the running thread. */
+  setCodexApprovalMode: (mode: CodexApprovalMode) => Promise<void>;
   /**
    * Switch a running claude-native session's permission mode (e.g. to
    * ``"auto"``). Rejects when the live TUI could not reach the mode, so
@@ -828,6 +837,15 @@ let queryClient: QueryClient | null = null;
  */
 export function releaseConversation(id: string): void {
   conversationRegistry.release(id);
+}
+
+/** Stop every live stream and discard all in-memory transcript state. */
+export function clearAllConversationState(): void {
+  conversationRegistry.clear();
+  rootSetState({
+    ...createInitialConversationState(),
+    conversationId: null,
+  } as Parameters<typeof rootSetState>[0]);
 }
 
 // Catalogs that resolved while their bind snapshot was still hydrating.
@@ -1319,6 +1337,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
   subagentRoutingOverride: null,
   codexPlanMode: false,
   claudePermissionMode: "",
+  codexApprovalMode: "default",
   hasMoreHistory: false,
   loadingMoreHistory: false,
   oldestItemId: null,
@@ -2314,6 +2333,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     setActive({
       costControlModeOverride: session.costControlModeOverride ?? null,
       subagentRoutingOverride: session.subagentRoutingOverride ?? null,
+      codexApprovalMode: codexApprovalModeFromSession(session),
     });
   },
 
@@ -2347,6 +2367,21 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       patchSet({ claudePermissionMode: claudePermissionModeFromSession(session) ?? "" });
     } catch (err) {
       patchSet({ claudePermissionMode: previous });
+      throw err;
+    }
+  },
+
+  setCodexApprovalMode: async (mode) => {
+    const { conversationId } = get();
+    if (!conversationId) return;
+    const previous = get().codexApprovalMode;
+    const patchSet = setterFor(conversationId);
+    patchSet({ codexApprovalMode: mode });
+    try {
+      const session = await updateSession(conversationId, { codexApprovalMode: mode });
+      patchSet({ codexApprovalMode: codexApprovalModeFromSession(session) });
+    } catch (err) {
+      patchSet({ codexApprovalMode: previous });
       throw err;
     }
   },
@@ -2972,6 +3007,7 @@ function sessionBindingPatch(
   | "subagentRoutingOverride"
   | "codexPlanMode"
   | "claudePermissionMode"
+  | "codexApprovalMode"
   | "contextWindow"
   | "gitBranch"
   | "skills"
@@ -3000,6 +3036,7 @@ function sessionBindingPatch(
     claudePermissionMode: isNativeTerminalSessionFn(session)
       ? (claudePermissionModeFromSession(session) ?? "")
       : "",
+    codexApprovalMode: codexApprovalModeFromSession(session),
     contextWindow: session.contextWindow ?? null,
     gitBranch: session.gitBranch ?? null,
     skills: session.skills ?? [],

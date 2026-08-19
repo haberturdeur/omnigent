@@ -631,6 +631,7 @@ def live_server(
         **os.environ,
         "OPENAI_API_KEY": llm_api_key,
         "OMNIGENT_BUILTIN_AGENT_DIRS": str(builtin_sdk_chat_spec),
+        "OMNIGENT_PROFILE_PROTECTION_PATH": str(db_path.with_name("profile-protection.json")),
     }
     # Prepend the worktree so the server imports the branch's source (see
     # comment above). Dropped in compat mode so the pinned older server in

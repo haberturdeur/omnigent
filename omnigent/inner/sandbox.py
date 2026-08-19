@@ -458,8 +458,41 @@ def _resolve_grant_root(cwd: Path, root: str) -> Path:
     return path.resolve(strict=False)
 
 
+def _profile_isolation_masks(cwd: Path) -> tuple[Path, ...]:
+    # Private-profile roots are an isolation floor independent of an
+    # agent's ordinary access policy. A profile keeps its own roots while
+    # every other private profile is masked from its mount namespace.
+    from omnigent.runner.identity import runner_isolation_snapshot_from_env
+
+    runner_snapshot = runner_isolation_snapshot_from_env(os.environ)
+    if runner_snapshot is None:
+        # Compatibility for local/older runners sharing the server data dir.
+        from omnigent.server.profile_protection import isolation_masks_for_workspace
+
+        return isolation_masks_for_workspace(cwd)
+    _generation, _host_id, profile_masks = runner_snapshot
+    return profile_masks
+
+
+def profile_masks_require_sandbox(cwd: Path) -> bool:
+    """Return whether this workspace must hide private-profile roots."""
+    return bool(_profile_isolation_masks(cwd))
+
+
 def resolve_sandbox(spec: OSEnvSpec, cwd: Path) -> SandboxPolicy:
     sandbox_spec = spec.sandbox or _default_sandbox_for_platform()
+    profile_masks = _profile_isolation_masks(cwd)
+    if profile_masks and sandbox_spec.type != "linux_bwrap":
+        sandbox_spec = replace(
+            sandbox_spec,
+            type="linux_bwrap",
+            write_paths=(
+                ["/"]
+                if sandbox_spec.type == "none" and sandbox_spec.write_paths is None
+                else sandbox_spec.write_paths
+            ),
+        )
+        spec = replace(spec, sandbox=sandbox_spec)
     if sandbox_spec.type == "none":
         # ``sandbox.type: none`` runs the helper UNSANDBOXED, so path grants
         # cannot *restrict* the (unconfined) shell -- a network restriction is
@@ -488,7 +521,17 @@ def resolve_sandbox(spec: OSEnvSpec, cwd: Path) -> SandboxPolicy:
             write_files=write_files,
             allow_network=True,
         )
-    return _get_backend(sandbox_spec.type).resolve(spec, cwd)
+    policy = _get_backend(sandbox_spec.type).resolve(spec, cwd)
+    if profile_masks:
+        masks = list(policy.mask_paths or [])
+        seen = {path.resolve(strict=False) for path in masks}
+        for root in profile_masks:
+            resolved = root.resolve(strict=False)
+            if resolved not in seen:
+                masks.append(resolved)
+                seen.add(resolved)
+        policy.mask_paths = masks
+    return policy
 
 
 def containment_prefix(root: str | Path) -> str:

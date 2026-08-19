@@ -16,6 +16,7 @@ import { useNewSessionHotkey } from "@/hooks/useNewSessionHotkey";
 import { useIsEmbedded } from "@/lib/embedded";
 import { AgentInfoContent, agentHasInfo } from "@/components/AgentInfo";
 import { useIdleNotifications } from "@/hooks/useIdleNotifications";
+import { useNotificationPresence } from "@/hooks/useNotificationPresence";
 import { useSeedReadState } from "@/hooks/useUnseenConversations";
 import { useIOSViewportLock } from "@/hooks/useIOSViewportLock";
 import { readFilesPanelPreferences, writeFilesPanelPreferences } from "@/lib/filesPanelPreferences";
@@ -79,6 +80,7 @@ import {
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { isSingleUserMode } from "@/lib/capabilities";
 import { isCurrentServerLocal } from "@/lib/serverOrigin";
+import { useActiveProfile } from "@/lib/profilesApi";
 import { useChatStore } from "@/store/chatStore";
 import {
   STARTING_GRACE_S,
@@ -177,6 +179,9 @@ function resolveTerminalViewKey(stored: string | null, agentKey: string): string
 }
 
 export function AppShell() {
+  // Resolve the client-local profile before route content mounts so new-chat
+  // defaults cannot race it. Profile errors still fall through to the shell.
+  const { isLoading: profileLoading } = useActiveProfile();
   // Cmd/Ctrl+Enter accepts the pending harness approval prompt. Bound once
   // here so it works on every chat route, regardless of where focus sits.
   useApproveHotkey();
@@ -413,6 +418,7 @@ export function AppShell() {
   // the active conversation id, which suppresses the notification/badge for
   // the session the user is actively viewing.
   useIdleNotifications(conversationId);
+  useNotificationPresence(conversationId);
   // Seed the per-user read-state (unread/seen) mirror from the conversation
   // list, so the sidebar dots reflect what the user did on any device.
   // `undefined` while the query is still loading (vs `[]` for a loaded-but-
@@ -1742,6 +1748,10 @@ export function AppShell() {
     !executionLogsOpen &&
     !filesPanelOpen,
   );
+
+  if (profileLoading) {
+    return <div className="h-dvh bg-sidebar" aria-label="Loading profile" />;
+  }
 
   return (
     <FileViewerContext.Provider value={fileViewerContextValue}>

@@ -28,7 +28,7 @@ class ServerStoreTest {
         val store = storeWithPresets()
 
         assertFalse(store.hasServer())
-        assertEquals("http://10.0.2.2:8000", store.currentServerUrl())
+        assertEquals("https://10.0.2.2:8000", store.currentServerUrl())
     }
 
     @Test
@@ -40,7 +40,7 @@ class ServerStoreTest {
         assertEquals(listOf("https://managed.example.com"), store.offeredServers())
         // Nothing was written, so a later policy change is picked up as-is.
         assertEquals(emptyList<String>(), store.recentServers())
-        assertEquals("http://10.0.2.2:8000", store.currentServerUrl())
+        assertEquals("https://10.0.2.2:8000", store.currentServerUrl())
     }
 
     @Test
@@ -62,6 +62,16 @@ class ServerStoreTest {
 
         assertTrue(store.hasServer())
         assertEquals("https://managed.example.com", store.currentServerUrl())
+    }
+
+    @Test
+    fun `cleartext servers are never stored`() {
+        val store = storeWithPresets()
+
+        store.connect("http://omnigent.example.com")
+
+        assertFalse(store.hasServer())
+        assertEquals(emptyList<String>(), store.recentServers())
     }
 
     @Test

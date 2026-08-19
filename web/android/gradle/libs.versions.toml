@@ -8,6 +8,7 @@ androidxActivity = "1.12.4"
 androidxWebkit = "1.15.0"
 # AppCompat 1.8.x is currently in preview; stick with the latest stable 1.7.x.
 androidxAppcompat = "1.7.1"
+androidxBiometric = "1.1.0"
 junit = "4.13.2"
 robolectric = "4.16.1"
 androidxTestCore = "1.7.0"
@@ -18,11 +19,13 @@ espresso = "3.7.0"
 uiautomator = "2.4.0"
 # Gradle Play Publisher 4.x supports AGP 9.x; 3.x does not.
 playPublisher = "4.0.0"
+unifiedPush = "3.0.10"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "androidxCore" }
 androidx-activity = { group = "androidx.activity", name = "activity-ktx", version.ref = "androidxActivity" }
 androidx-appcompat = { group = "androidx.appcompat", name = "appcompat", version.ref = "androidxAppcompat" }
+androidx-biometric = { group = "androidx.biometric", name = "biometric", version.ref = "androidxBiometric" }
 androidx-webkit = { group = "androidx.webkit", name = "webkit", version.ref = "androidxWebkit" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 robolectric = { group = "org.robolectric", name = "robolectric", version.ref = "robolectric" }
@@ -32,6 +35,7 @@ androidx-test-rules = { group = "androidx.test", name = "rules", version.ref = "
 androidx-test-ext-junit = { group = "androidx.test.ext", name = "junit", version.ref = "androidxTestExtJunit" }
 espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espresso" }
 uiautomator = { group = "androidx.test.uiautomator", name = "uiautomator", version.ref = "uiautomator" }
+unifiedpush-connector = { group = "org.unifiedpush.android", name = "connector", version.ref = "unifiedPush" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

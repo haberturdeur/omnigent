@@ -138,8 +138,16 @@ class _RecordingCodexAppServerClient:
                 },
             },
         ),
+        (
+            {"type": "codex_approval_mode_change", "approval_mode": "read-only"},
+            {
+                "threadId": "thread_codex",
+                "approvalPolicy": "on-request",
+                "sandbox": "read-only",
+            },
+        ),
     ],
-    ids=["model_change", "effort_change", "plan_mode_change"],
+    ids=["model_change", "effort_change", "plan_mode_change", "approval_mode_change"],
 )
 async def test_events_codex_native_settings_change_uses_thread_settings_update(
     monkeypatch: pytest.MonkeyPatch,

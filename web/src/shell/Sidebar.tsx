@@ -27,6 +27,7 @@ import {
   FolderInputIcon,
   FolderMinusIcon,
   FolderOpenIcon,
+  FolderSyncIcon,
   GitBranchIcon,
   InboxIcon,
   ListChecksIcon,
@@ -117,10 +118,14 @@ import {
   useConversations,
   useLeaveSession,
   useMoveToProject,
+  useMoveSessionToProfile,
   useDeleteProject,
   useRenameProject,
   useProjectConfig,
   useUpdateProjectConfig,
+  useMoveProjectToProfile,
+  useMoveProjectFolderToProfile,
+  useAddProjectRootToPrivateProfile,
   PROJECT_LABEL_KEY,
   PINNED_CONVERSATIONS_KEY,
   usePinnedConversations,
@@ -142,6 +147,7 @@ import { PermissionsModal } from "@/components/PermissionsModal";
 import { ProjectSettingsDialog } from "./ProjectSettingsDialog";
 import { ProjectRowIcon } from "./ProjectPicker";
 import { EmojiPicker } from "@/components/ProjectIconPicker";
+import { ProfileSwitcher } from "./ProfileSwitcher";
 import { SessionStateBadge } from "@/components/SessionStateBadge";
 import { useSessionRunnerOnline } from "@/hooks/RunnerHealthProvider";
 import { useActiveRootSessionId } from "@/hooks/useSession";
@@ -149,6 +155,8 @@ import { useCommentInbox } from "@/hooks/useCommentInbox";
 import { sumPendingApprovals } from "@/lib/inbox";
 import { isSessionStoppable } from "@/lib/sessionStop";
 import { getCurrentUserId, resolveIdentity } from "@/lib/identity";
+import { getProfileUnlockToken } from "@/lib/profileUnlock";
+import { useActiveProfile } from "@/lib/profilesApi";
 import { isImeCompositionKeyEvent } from "@/lib/ime";
 import { useHasSessionDraft } from "@/lib/sessionDrafts";
 import { getSessionState, type SessionState } from "@/hooks/useSessionState";
@@ -893,6 +901,8 @@ export function Sidebar({
                 onOpenSearch={onOpenSearch}
               />
             </div>
+
+            <ProfileSwitcher />
 
             <div className="flex flex-col gap-0 px-2 pt-2 pb-0" data-testid="sidebar-primary-nav">
               {/* "New session" routes to the home composer ("/"), which now owns
@@ -2925,6 +2935,7 @@ function ConversationMenuItems({
   setStopOpen,
   setDeleteOpen,
   setLeaveOpen,
+  setMoveProfileOpen,
   setMenuOpen,
   runArchive,
 }: {
@@ -2954,6 +2965,7 @@ function ConversationMenuItems({
   setStopOpen: (open: boolean) => void;
   setDeleteOpen: (open: boolean) => void;
   setLeaveOpen: (open: boolean) => void;
+  setMoveProfileOpen: (open: boolean) => void;
   // Closes the controlled kebab after a project pick; a no-op for the
   // (uncontrolled) context menu, which Radix closes on select automatically.
   setMenuOpen: (open: boolean) => void;
@@ -3135,6 +3147,12 @@ function ConversationMenuItems({
             </C.SubContent>
           </C.Sub>
         ))}
+      {isOwner && currentProject === null && (
+        <C.Item data-testid="move-session-to-profile" onSelect={() => setMoveProfileOpen(true)}>
+          <FolderSyncIcon className="size-3.5" />
+          Move to profile
+        </C.Item>
+      )}
       {/* Stop / Archive / Delete are grouped at the bottom, below a
           divider: lifecycle-ending actions separated from the everyday
           ones above. */}
@@ -3339,6 +3357,7 @@ function ConversationRow({
   const archive = useArchiveConversation();
   const leave = useLeaveSession();
   const moveToProject = useMoveToProject();
+  const moveToProfile = useMoveSessionToProfile();
   // The kebab's user-facing "Stop session" action. Archiving does NOT go
   // through here — the server stops the session itself once the archived
   // flag commits, so a hidden session never keeps a runner alive.
@@ -3367,6 +3386,11 @@ function ConversationRow({
   const [deleteBranch, setDeleteBranch] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
   const [leaveOpen, setLeaveOpen] = useState(false);
+  const [moveProfileOpen, setMoveProfileOpen] = useState(false);
+  const [destinationProfileId, setDestinationProfileId] = useState("");
+  const { profiles, activeProfileId } = useActiveProfile();
+  const sourceProfileId = conversation.profile_id ?? activeProfileId;
+  const destinationProfiles = profiles.filter((profile) => profile.id !== sourceProfileId);
   const gitBranch = conversation.git_branch ?? null;
   // Every row action gates on ownership alone — the sidebar carries no
   // effective-permission level, so rename/share/move/drag are owner-only and
@@ -3631,6 +3655,7 @@ function ConversationRow({
     setStopOpen,
     setDeleteOpen,
     setLeaveOpen,
+    setMoveProfileOpen,
     runArchive,
   };
 
@@ -3913,6 +3938,75 @@ function ConversationRow({
         </div>
       )}
       <PermissionsModal sessionId={conversation.id} open={shareOpen} onOpenChange={setShareOpen} />
+      <Dialog
+        open={moveProfileOpen}
+        onOpenChange={(open) => {
+          setMoveProfileOpen(open);
+          if (!open) setDestinationProfileId("");
+        }}
+      >
+        <DialogContent onClick={(event) => event.stopPropagation()}>
+          <DialogHeader>
+            <DialogTitle>Move session to profile</DialogTitle>
+            <DialogDescription>
+              The session and its sub-agent history will move together.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2 py-2">
+            {destinationProfiles.map((profile) => {
+              const locked = Boolean(profile.protection.lock && !getProfileUnlockToken(profile.id));
+              return (
+                <button
+                  key={profile.id}
+                  type="button"
+                  disabled={locked}
+                  className={cn(
+                    "flex w-full items-center justify-between rounded-md border px-3 py-2 text-left text-sm",
+                    destinationProfileId === profile.id && "border-primary bg-primary/5",
+                    locked && "cursor-not-allowed opacity-50",
+                  )}
+                  onClick={() => setDestinationProfileId(profile.id)}
+                >
+                  <span>{profile.name}</span>
+                  <span className="text-xs text-muted-foreground">
+                    {locked ? "Locked" : destinationProfileId === profile.id ? "Selected" : ""}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+          {moveToProfile.isError && (
+            <p className="text-sm text-destructive" role="alert">
+              {(moveToProfile.error as Error).message}
+            </p>
+          )}
+          <DialogFooter className="border-t-0 bg-transparent">
+            <Button type="button" variant="ghost" onClick={() => setMoveProfileOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              data-testid="move-session-profile-confirm"
+              loading={moveToProfile.isPending}
+              disabled={!destinationProfileId}
+              onClick={() =>
+                moveToProfile.mutate(
+                  { id: conversation.id, profileId: destinationProfileId },
+                  {
+                    onSuccess: () => {
+                      setMoveProfileOpen(false);
+                      setMenuOpen(false);
+                      if (isActive) navigate("/", { replace: true });
+                    },
+                  },
+                )
+              }
+            >
+              Move session
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <Dialog
         open={deleteOpen}
         onOpenChange={(open) => {
@@ -4213,6 +4307,10 @@ function ProjectFolderMenuItems({
         <Settings2Icon className="size-3.5" />
         Project settings
       </C.Item>
+      <C.Item data-testid="move-project" onSelect={actions.openMove}>
+        <FolderSyncIcon className="size-3.5" />
+        Move to profile
+      </C.Item>
       <C.Item data-testid="delete-project" variant="destructive" onSelect={actions.openDelete}>
         <Trash2Icon className="size-3.5" />
         Delete project
@@ -4224,6 +4322,7 @@ function ProjectFolderMenuItems({
 interface ProjectFolderMenuActions {
   openRename: () => void;
   openSettings: () => void;
+  openMove: () => void;
   openDelete: () => void;
   onMenuOpen: () => void;
   onMenuClose: () => void;
@@ -4240,6 +4339,8 @@ function useProjectFolderMenu(
   const [renameOpen, setRenameOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [emojiOpen, setEmojiOpen] = useState(false);
+  const [moveOpen, setMoveOpen] = useState(false);
+  const [destinationProfileId, setDestinationProfileId] = useState("");
   const [renameValue, setRenameValue] = useState(projectName);
   // The icon staged in the rename modal, committed only on Confirm:
   //   undefined = untouched (show the saved icon), string = a picked emoji,
@@ -4266,6 +4367,14 @@ function useProjectFolderMenu(
   // What the modal's tile shows: the staged pick when touched, else the saved
   // icon. `null` (staged removal) renders as the empty folder.
   const displayIcon = pendingIcon !== undefined ? pendingIcon : savedIcon;
+  const moveProject = useMoveProjectToProfile();
+  const moveProjectFolder = useMoveProjectFolderToProfile();
+  const addProjectRoot = useAddProjectRootToPrivateProfile();
+  const { profiles, activeProfileId } = useActiveProfile();
+  const destinationProfiles = profiles.filter((profile) => profile.id !== activeProfileId);
+  const destinationPrivate = Boolean(
+    destinationProfiles.find((profile) => profile.id === destinationProfileId)?.protection.lock,
+  );
 
   const actions = useMemo<ProjectFolderMenuActions>(
     () => ({
@@ -4275,6 +4384,10 @@ function useProjectFolderMenu(
         setRenameOpen(true);
       },
       openSettings: () => setSettingsOpen(true),
+      openMove: () => {
+        setDestinationProfileId("");
+        setMoveOpen(true);
+      },
       openDelete: () => setDeleteOpen(true),
       onMenuOpen: () => setMenuOpen(true),
       onMenuClose: () => setMenuOpen(false),
@@ -4473,6 +4586,119 @@ function useProjectFolderMenu(
         projectId={projectId}
         projectName={projectName}
       />
+      <Dialog open={moveOpen} onOpenChange={setMoveOpen}>
+        <DialogContent onClick={(event) => event.stopPropagation()}>
+          <DialogHeader>
+            <DialogTitle>Move project to profile</DialogTitle>
+            <DialogDescription>
+              The project and all of its sessions will move together.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2 py-2">
+            {destinationProfiles.map((profile) => {
+              const locked = Boolean(profile.protection.lock && !getProfileUnlockToken(profile.id));
+              return (
+                <button
+                  key={profile.id}
+                  type="button"
+                  disabled={locked}
+                  className={cn(
+                    "flex w-full items-center justify-between rounded-md border px-3 py-2 text-left text-sm",
+                    destinationProfileId === profile.id && "border-primary bg-primary/5",
+                    locked && "cursor-not-allowed opacity-50",
+                  )}
+                  onClick={() => setDestinationProfileId(profile.id)}
+                >
+                  <span>{profile.name}</span>
+                  <span className="text-xs text-muted-foreground">
+                    {locked ? "Locked" : destinationProfileId === profile.id ? "Selected" : ""}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+          {(moveProject.isError || moveProjectFolder.isError || addProjectRoot.isError) && (
+            <p className="text-sm text-destructive" role="alert">
+              {
+                ((moveProject.error ?? moveProjectFolder.error ?? addProjectRoot.error) as Error)
+                  .message
+              }
+            </p>
+          )}
+          <DialogFooter className="border-t-0 bg-transparent">
+            <Button type="button" variant="ghost" onClick={() => setMoveOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              data-testid="add-project-private-root-confirm"
+              loading={addProjectRoot.isPending}
+              disabled={
+                !destinationProfileId ||
+                !destinationPrivate ||
+                moveProject.isPending ||
+                moveProjectFolder.isPending ||
+                addProjectRoot.isPending
+              }
+              onClick={() =>
+                addProjectRoot.mutate(
+                  { id: projectId, name: projectName, profileId: destinationProfileId },
+                  {
+                    onSuccess: () => {
+                      setMoveOpen(false);
+                      setMenuOpen(false);
+                    },
+                  },
+                )
+              }
+            >
+              Add project root as additional private root for the profile
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              data-testid="move-project-folder-confirm"
+              loading={moveProjectFolder.isPending}
+              disabled={!destinationProfileId || moveProject.isPending || addProjectRoot.isPending}
+              onClick={() =>
+                moveProjectFolder.mutate(
+                  { id: projectId, name: projectName, profileId: destinationProfileId },
+                  {
+                    onSuccess: () => {
+                      setMoveOpen(false);
+                      setMenuOpen(false);
+                    },
+                  },
+                )
+              }
+            >
+              Move project folder
+            </Button>
+            <Button
+              type="button"
+              data-testid="move-project-confirm"
+              loading={moveProject.isPending}
+              disabled={
+                !destinationProfileId || moveProjectFolder.isPending || addProjectRoot.isPending
+              }
+              onClick={() =>
+                moveProject.mutate(
+                  { id: projectId, name: projectName, profileId: destinationProfileId },
+                  {
+                    onSuccess: () => {
+                      setMoveOpen(false);
+                      setMenuOpen(false);
+                    },
+                  },
+                )
+              }
+            >
+              Move project
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
         <DialogContent onClick={(e) => e.stopPropagation()}>
           <DialogHeader>

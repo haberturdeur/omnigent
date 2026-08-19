@@ -1,7 +1,9 @@
 package ai.omnigent.android
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -9,6 +11,19 @@ import org.robolectric.RobolectricTestRunner
 /** Bare Databricks workspace roots resolve to the `/omnigent` mount. */
 @RunWith(RobolectricTestRunner::class)
 class OriginsWorkspaceUiUrlTest {
+    @Test
+    fun `server base path accepts only itself and descendants`() {
+        val base = "https://example.test/omnigent"
+
+        assertTrue(isWithinServerBase("$base?tab=chat#latest", base))
+        assertTrue(isWithinServerBase("$base/c/session", base))
+        assertFalse(isWithinServerBase("https://example.test/omnigent-evil", base))
+        assertFalse(isWithinServerBase("https://example.test/other", base))
+        assertFalse(isWithinServerBase("https://other.test/omnigent", base))
+        assertFalse(isWithinServerBase("$base/../private", base))
+        assertFalse(isWithinServerBase("$base/%2e%2e/private", base))
+    }
+
     @Test
     fun `expands a bare workspace root`() {
         assertEquals(

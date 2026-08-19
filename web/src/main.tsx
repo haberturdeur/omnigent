@@ -14,6 +14,7 @@ import { CapabilitiesProvider } from "./lib/CapabilitiesContext";
 import { createBootServerInfo, withBootTimeout } from "./lib/bootCapabilities";
 import { isLoginRedirectPending, resolveIdentity } from "./lib/identity";
 import { initNativeInsets } from "./lib/nativeInsets";
+import { installStaleAssetRecovery } from "./lib/staleAssetRecovery";
 import { initBrowserTelemetry } from "./lib/telemetry";
 import {
   applyDesktopUiFontSize,
@@ -27,6 +28,10 @@ import { initChatStore } from "./store/chatStore";
 import "katex/dist/katex.min.css";
 import "streamdown/styles.css";
 import "./index.css";
+
+// A tab can outlive a deployment and still reference a removed hashed chunk.
+// Reload once onto the current no-cache index instead of crashing the React tree.
+installStaleAssetRecovery();
 
 // Start tracing before any request fires so fetch/XHR are patched in time
 // and a trace begins in the browser. No-op unless a collector endpoint is

@@ -2018,21 +2018,20 @@ def create_terminal_instance(
     egress_allow_private: bool = False
     if effective_os_env_spec.sandbox is not None:
         sandbox_spec = effective_os_env_spec.sandbox
-        if sandbox_spec.type != "none":
-            sandbox = resolve_sandbox(effective_os_env_spec, cwd)
-            if sandbox.active:
-                # Add the private dir to write roots so a forked working
-                # tree (``private_dir/root``) and the instance dir stay
-                # writable inside the pane.
-                sandbox = with_additional_write_roots(sandbox, [private_dir])
-                # The tmux control socket lives inside that
-                # now-writable ``private_dir``. Deny the sandboxed pane
-                # from reaching it so it cannot ``tmux -S <sock> run-shell``
-                # against the unsandboxed server. bwrap overlays /dev/null
-                # onto the socket path; seatbelt emits a network-outbound
-                # unix-socket deny (its default allow_network=true would
-                # otherwise permit the connect).
-                sandbox = with_denied_unix_sockets(sandbox, [socket_path])
+        sandbox = resolve_sandbox(effective_os_env_spec, cwd)
+        if sandbox.active:
+            # Add the private dir to write roots so a forked working
+            # tree (``private_dir/root``) and the instance dir stay
+            # writable inside the pane.
+            sandbox = with_additional_write_roots(sandbox, [private_dir])
+            # The tmux control socket lives inside that
+            # now-writable ``private_dir``. Deny the sandboxed pane
+            # from reaching it so it cannot ``tmux -S <sock> run-shell``
+            # against the unsandboxed server. bwrap overlays /dev/null
+            # onto the socket path; seatbelt emits a network-outbound
+            # unix-socket deny (its default allow_network=true would
+            # otherwise permit the connect).
+            sandbox = with_denied_unix_sockets(sandbox, [socket_path])
         # Plumb the egress allow-list from the OSEnvSandboxSpec
         # onto the instance so :meth:`launch` can start a
         # parent-side MITM proxy. SandboxPolicy itself only carries

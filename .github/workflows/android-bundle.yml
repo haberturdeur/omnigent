@@ -1,8 +1,8 @@
-name: Android Bundle
+name: Android
 
-# Builds an unsigned release AAB in CI and uploads it as a workflow artifact.
-# Download the artifact and sign it locally with your upload keystore — no
-# secrets on GitHub, no signing key in CI.
+# Tests the Android shell and publishes an installable debug APK for every
+# successful run. Manual runs additionally build an unsigned release AAB that
+# can be downloaded and signed locally; signing keys never enter GitHub CI.
 
 on:
   workflow_dispatch:
@@ -20,6 +20,12 @@ on:
         required: false
         default: ""
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - ".github/workflows/android-bundle.yml"
+      - "web/android/**"
+  push:
+    branches: [main]
     paths:
       - ".github/workflows/android-bundle.yml"
       - "web/android/**"
@@ -27,10 +33,20 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: android-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  gate:
+    uses: ./.github/workflows/security-gate.yml
+
   build:
-    name: Build unsigned AAB
+    name: Test and build APK
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    needs: gate
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: web/android
@@ -48,24 +64,44 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@48b5f213c81028ace310571dc5ec0fbbca0b2947  # v4
         with:
-          cache-read-only: false
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
+
+      - name: Test, lint, and build debug APK
+        run: ./gradlew testDebugUnitTest lintDebug assembleDebug --no-daemon --console=plain
+
+      - name: Verify APK
+        run: |
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          test -f "$APK" || { echo "::error::APK not found at $APK"; exit 1; }
+          echo "APK size: $(du -h "$APK" | cut -f1)"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: omnigent-android-debug-apk
+          path: web/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Build release AAB
+        if: github.event_name == 'workflow_dispatch'
         run: |
           ./gradlew bundleRelease --no-daemon --console=plain \
             "-PversionCode=${{ inputs.version-code }}" \
             "-PversionName=${{ inputs.version-name }}"
 
-      - name: Verify artifact
+      - name: Verify AAB
+        if: github.event_name == 'workflow_dispatch'
         run: |
           AAB=app/build/outputs/bundle/release/app-release.aab
           test -f "$AAB" || { echo "::error::AAB not found at $AAB"; exit 1; }
           echo "AAB size: $(du -h "$AAB" | cut -f1)"
 
-      - name: Upload artifact
+      - name: Upload AAB
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: omnigent-android-aab${{ inputs.version-note && format('-{0}', inputs.version-note) || '' }}
           path: web/android/app/build/outputs/bundle/release/app-release.aab
+          if-no-files-found: error
           retention-days: 30

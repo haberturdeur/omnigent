@@ -7,7 +7,8 @@
 
 import { useEffect, useRef } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { authenticatedFetch } from "@/lib/identity";
+import { authenticatedFetch, getAuthenticatedRequestHeaders } from "@/lib/identity";
+import { downloadNativeFile, getNativeServerBaseUrl } from "@/lib/nativeBridge";
 import {
   browseLocationBase,
   browseLocationSegment,
@@ -18,6 +19,7 @@ import { useChatStore } from "@/store/chatStore";
 // The primary workspace environment is always "default".  This hook targets
 // the primary workspace; pass a different id if terminal environments are needed.
 const DEFAULT_ENVIRONMENT_ID = "default";
+const OBJECT_URL_LIFETIME_MS = 60_000;
 
 export interface FileContentResponse {
   object: "session.environment.filesystem.file_content";
@@ -74,8 +76,8 @@ export function fileContentToBlob(data: FileContentResponse): Blob {
  * Programmatically trigger a browser file download for the given ``Blob``.
  *
  * Creates a temporary object URL, clicks a synthetic ``<a>`` element to
- * initiate the download, then immediately cleans up both the element and
- * the URL.
+ * initiate the download, then removes the element. The URL remains alive
+ * briefly because Android WebView resolves blob downloads asynchronously.
  *
  * :param blob: The file data to download.
  * :param filename: The suggested filename presented to the browser's save dialog.
@@ -88,27 +90,35 @@ export function triggerBrowserDownload(blob: Blob, filename: string): void {
   document.body.append(link);
   link.click();
   link.remove();
-  URL.revokeObjectURL(url);
+  window.setTimeout(() => URL.revokeObjectURL(url), OBJECT_URL_LIFETIME_MS);
 }
 
 /**
  * Fetch a workspace file and trigger a browser download of its contents.
  *
- * Logs a console warning when the server indicates the file was truncated
- * (``truncated: true``) so callers know the downloaded content may be
- * incomplete.
- *
  * :param conversationId: The session/conversation ID, e.g. ``"sess_abc123"``.
  * :param path: Workspace-relative file path, e.g. ``"src/main.py"``.
  */
 export async function downloadWorkspaceFile(conversationId: string, path: string): Promise<void> {
-  const data = await fetchFileContent(conversationId, path);
-  if (data.truncated) {
-    console.warn(
-      `[web] File "${path}" was truncated by the server — downloaded content may be incomplete.`,
-    );
+  const encodedPath = path.split("/").map(encodeURIComponent).join("/");
+  const url =
+    `/v1/sessions/${encodeURIComponent(conversationId)}` +
+    `/resources/environments/${DEFAULT_ENVIRONMENT_ID}/filesystem-download/${encodedPath}`;
+  const filename = path.split("/").pop() ?? path;
+  const headers = await getAuthenticatedRequestHeaders(url);
+  const serverBaseUrl = getNativeServerBaseUrl() ?? window.location.origin;
+  if (
+    downloadNativeFile({
+      url: `${serverBaseUrl.replace(/\/$/, "")}/${url.replace(/^\//, "")}`,
+      name: filename,
+      headers: Object.fromEntries(headers.entries()),
+    })
+  ) {
+    return;
   }
-  triggerBrowserDownload(fileContentToBlob(data), path.split("/").pop() ?? path);
+  const res = await authenticatedFetch(url);
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  triggerBrowserDownload(await res.blob(), filename);
 }
 
 /**

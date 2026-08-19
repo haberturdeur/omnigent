@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from functools import partial
@@ -17,7 +18,12 @@ from starlette.requests import HTTPConnection
 
 from omnigent.errors import OmnigentError
 from omnigent.runner import create_runner_app
-from omnigent.runner.identity import RUNNER_TUNNEL_TOKEN_HEADER, token_bound_runner_id
+from omnigent.runner.identity import (
+    RUNNER_ISOLATION_HOST_ID_HEADER,
+    RUNNER_PROTECTION_GENERATION_HEADER,
+    RUNNER_TUNNEL_TOKEN_HEADER,
+    token_bound_runner_id,
+)
 from omnigent.runner.transports.ws_tunnel.frames import (
     HelloFrame,
     PingFrame,
@@ -36,6 +42,189 @@ pytestmark = pytest.mark.asyncio
 
 _RUNNER_ID = "runner-route-test-1"
 _TUNNEL_PATH = f"/v1/runners/{_RUNNER_ID}/tunnel"
+
+
+@pytest.fixture(autouse=True)
+def _isolated_profile_registry(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep tunnel admission tests independent of the developer's registry."""
+    monkeypatch.setenv(
+        "OMNIGENT_PROFILE_PROTECTION_PATH", str(tmp_path / "profile-protection.json")
+    )
+
+
+def _write_profile_registry(tmp_path, *, generation: int, active: bool) -> None:
+    """Write the minimal valid protection registry needed by handshake tests."""
+    profiles = (
+        [
+            {
+                "profile_id": "private",
+                "user_id": None,
+                "passcode_hash": "unused",
+                "protected_roots": [str(tmp_path / "private")],
+                "unlock_token_hashes": [],
+            }
+        ]
+        if active
+        else []
+    )
+    (tmp_path / "profile-protection.json").write_text(
+        json.dumps({"generation": generation, "profiles": profiles}),
+        encoding="utf-8",
+    )
+
+
+async def test_ws_tunnel_rejects_stale_protection_generation(tmp_path) -> None:
+    """A runner launched before a protection change cannot reconnect."""
+    _write_profile_registry(tmp_path, generation=8, active=True)
+    route_app = _tunnel_route_app()
+    communicator = ApplicationCommunicator(
+        route_app.app,
+        _websocket_scope(
+            _TUNNEL_PATH,
+            headers=[
+                (
+                    RUNNER_PROTECTION_GENERATION_HEADER.lower().encode("ascii"),
+                    b"7",
+                )
+            ],
+            client_host="127.0.0.1",
+        ),
+    )
+
+    await communicator.send_input({"type": "websocket.connect"})
+    accepted = await communicator.receive_output(timeout=1.0)
+    closed = await communicator.receive_output(timeout=1.0)
+
+    assert accepted == {
+        "type": "websocket.accept",
+        "subprotocol": None,
+        "headers": [],
+    }
+    assert closed == {
+        "type": "websocket.close",
+        "code": 4005,
+        "reason": "runner protection generation is stale",
+    }
+
+
+async def test_ws_tunnel_rejects_remote_legacy_runner_when_protection_is_active(tmp_path) -> None:
+    """Legacy runners cannot bypass active private-root isolation."""
+    _write_profile_registry(tmp_path, generation=8, active=True)
+    route_app = _tunnel_route_app()
+    token = "legacy-runner-token"
+    runner_id = token_bound_runner_id(token)
+    communicator = ApplicationCommunicator(
+        route_app.app,
+        _websocket_scope(
+            f"/v1/runners/{runner_id}/tunnel",
+            headers=[
+                (
+                    RUNNER_TUNNEL_TOKEN_HEADER.lower().encode("ascii"),
+                    token.encode("ascii"),
+                )
+            ],
+            client_host="10.0.0.1",
+        ),
+    )
+    await communicator.send_input({"type": "websocket.connect"})
+
+    assert await communicator.receive_output(timeout=1.0) == {
+        "type": "websocket.accept",
+        "subprotocol": None,
+        "headers": [],
+    }
+    assert await communicator.receive_output(timeout=1.0) == {
+        "type": "websocket.close",
+        "code": 4005,
+        "reason": "runner protection generation is required",
+    }
+
+
+async def test_ws_tunnel_accepts_remote_legacy_runner_without_private_roots(tmp_path) -> None:
+    """Legacy runners remain compatible while no isolation roots are active."""
+    _write_profile_registry(tmp_path, generation=8, active=False)
+    route_app = _tunnel_route_app()
+    token = "legacy-runner-token"
+    runner_id = token_bound_runner_id(token)
+    communicator = await _connect_route(
+        route_app.app,
+        f"/v1/runners/{runner_id}/tunnel",
+        headers=[
+            (
+                RUNNER_TUNNEL_TOKEN_HEADER.lower().encode("ascii"),
+                token.encode("ascii"),
+            )
+        ],
+        client_host="10.0.0.1",
+    )
+
+    await _send_hello(communicator, route_app.registry, runner_id=runner_id)
+    try:
+        assert route_app.registry.online_runner_ids() == [runner_id]
+    finally:
+        await communicator.send_input({"type": "websocket.disconnect", "code": 1000})
+        with contextlib.suppress(asyncio.TimeoutError):
+            await communicator.wait(timeout=1.0)
+
+
+async def test_ws_tunnel_rejects_inconsistent_shared_protection_state(tmp_path) -> None:
+    """A database-declared private profile cannot run without registry roots."""
+    _write_profile_registry(tmp_path, generation=0, active=False)
+    route_app = _tunnel_route_app(declared_protected_profile_ids=lambda: frozenset({"private"}))
+    token = "inconsistent-registry-token"
+    runner_id = token_bound_runner_id(token)
+    communicator = ApplicationCommunicator(
+        route_app.app,
+        _websocket_scope(
+            f"/v1/runners/{runner_id}/tunnel",
+            headers=[
+                (
+                    RUNNER_TUNNEL_TOKEN_HEADER.lower().encode("ascii"),
+                    token.encode("ascii"),
+                )
+            ],
+            client_host="10.0.0.1",
+        ),
+    )
+    await communicator.send_input({"type": "websocket.connect"})
+
+    assert (await communicator.receive_output(timeout=1.0))["type"] == "websocket.accept"
+    assert await communicator.receive_output(timeout=1.0) == {
+        "type": "websocket.close",
+        "code": 4005,
+        "reason": "server protection registry is inconsistent",
+    }
+
+
+async def test_connected_tunnel_is_closed_when_protection_generation_changes(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An admitted runner cannot remain connected with stale masks."""
+    monkeypatch.setattr("omnigent.server.routes.runner_tunnel.GENERATION_WATCH_INTERVAL_S", 0.01)
+    _write_profile_registry(tmp_path, generation=8, active=True)
+    route_app = _tunnel_route_app()
+    communicator = await _connect_route(
+        route_app.app,
+        _TUNNEL_PATH,
+        headers=[
+            (
+                RUNNER_PROTECTION_GENERATION_HEADER.lower().encode("ascii"),
+                b"8",
+            ),
+            (RUNNER_ISOLATION_HOST_ID_HEADER.lower().encode("ascii"), b"host-a"),
+        ],
+        client_host="127.0.0.1",
+    )
+    await _send_hello(communicator, route_app.registry)
+
+    _write_profile_registry(tmp_path, generation=9, active=True)
+    closed = await communicator.receive_output(timeout=1.0)
+
+    assert closed == {
+        "type": "websocket.close",
+        "code": 4005,
+        "reason": "runner protection generation is stale",
+    }
 
 
 @dataclass(frozen=True)
@@ -125,6 +314,7 @@ def _tunnel_route_app(
     allowed_tunnel_tokens: frozenset[str] | None = None,
     auth_provider: AuthProvider | None = None,
     resolve_managed_runner_owner: Callable[[str], str | None] | None = None,
+    declared_protected_profile_ids: Callable[[], frozenset[str]] | None = None,
 ) -> TunnelRouteApp:
     """Create a minimal app containing only the runner tunnel route.
 
@@ -147,6 +337,7 @@ def _tunnel_route_app(
             allowed_tunnel_tokens=allowed_tunnel_tokens,
             auth_provider=auth_provider,
             resolve_managed_runner_owner=resolve_managed_runner_owner,
+            declared_protected_profile_ids=declared_protected_profile_ids,
         ),
         prefix="/v1",
     )

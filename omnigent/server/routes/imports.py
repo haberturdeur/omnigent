@@ -15,11 +15,20 @@ from pydantic import BaseModel, Field, field_validator
 
 from omnigent.db.utils import builtin_agent_id
 from omnigent.entities import NewConversationItem, parse_item_data
+from omnigent.entities.profile import Profile
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.host.frames import HostImportLocalFrame, encode_host_frame
 from omnigent.native_coding_agents import native_coding_agent_for_harness
 from omnigent.server.auth import LEVEL_OWNER, AuthProvider
 from omnigent.server.host_registry import HostConnection, HostRegistry
+from omnigent.server.profile_protection import (
+    PROFILE_UNLOCK_HEADER,
+    get_profile_protection_by_id,
+    profile_is_accessible,
+    profile_membership_write,
+    protected_profile_for_workspace,
+    workspace_belongs_to_profile,
+)
 from omnigent.server.routes._auth_helpers import require_access, require_user
 from omnigent.server.routes._content_type import require_json_content_type
 from omnigent.server.routes._host_launch import resolve_host_owner
@@ -35,6 +44,7 @@ from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.conversation_store import ConversationAlreadyExistsError
 from omnigent.stores.host_store import HostStore
 from omnigent.stores.permission_store import PermissionStore
+from omnigent.stores.profile_store import ProfileStore
 from omnigent.stores.project_store import ProjectStore
 
 # Upper bound on items in one imported session, shared by the CLI-normalized
@@ -73,6 +83,7 @@ class ImportSessionRequest(BaseModel):
     external_session_id: str = Field(min_length=1, max_length=128)
     workspace: str | None = Field(default=None, max_length=2048)
     title: str | None = Field(default=None, max_length=512)
+    profile_id: str | None = None
     force: bool = False
     project_id: str | None = None
     items: list[ImportItemInput] = Field(min_length=1, max_length=_MAX_IMPORT_ITEMS)
@@ -239,6 +250,7 @@ def create_imports_router(
     project_store: ProjectStore | None = None,
     host_registry: HostRegistry | None = None,
     host_store: HostStore | None = None,
+    profile_store: ProfileStore | None = None,
 ) -> APIRouter:
     """Create the local-session import router."""
     router = APIRouter()
@@ -252,6 +264,8 @@ def create_imports_router(
         user_id: str | None,
         native_title: str | None = None,
         project_id: str | None = None,
+        profile_id: str | None = None,
+        profile_host_id: str | None = None,
     ) -> tuple[str, str | None]:
         """Create the conversation, append items, stamp import labels, grant owner.
 
@@ -285,6 +299,10 @@ def create_imports_router(
             create_kwargs["workspace"] = workspace
         if project_id is not None:
             create_kwargs["project_id"] = project_id
+        if profile_id is not None:
+            create_kwargs["profile_id"] = profile_id
+        if profile_host_id is not None and workspace is not None:
+            create_kwargs["host_id"] = profile_host_id
         resolved_create = await resolve_project_session_create(
             body=SessionCreateRequest(**create_kwargs),
             user_id=user_id,
@@ -294,14 +312,17 @@ def create_imports_router(
         workspace = resolved_create.body.workspace
         title = (native_title or "").strip() or title_from_items(items)
         try:
-            conversation = await asyncio.to_thread(
-                conversation_store.create_conversation,
-                title=title,
-                agent_id=agent_id,
-                workspace=workspace,
-                conversation_id=_import_conversation_id(source, external_session_id),
-                project_id=resolved_create.project_id,
-            )
+            with profile_membership_write((profile_id,) if profile_id is not None else ()):
+                conversation = await asyncio.to_thread(
+                    conversation_store.create_conversation,
+                    title=title,
+                    agent_id=agent_id,
+                    host_id=profile_host_id if workspace is not None else None,
+                    workspace=workspace,
+                    conversation_id=_import_conversation_id(source, external_session_id),
+                    project_id=resolved_create.project_id,
+                    profile_id=profile_id,
+                )
         except ConversationAlreadyExistsError as exc:
             raise OmnigentError(
                 "This source session has already been imported",
@@ -348,6 +369,60 @@ def create_imports_router(
     ) -> ImportSessionResponse:
         """Import one normalized transcript, optionally replacing its prior import."""
         user_id = require_user(request, auth_provider)
+        profile_id = body.profile_id
+        destination_profile: Profile | None = None
+        if profile_store is not None:
+            if profile_id is None:
+                destination_profile = await asyncio.to_thread(
+                    profile_store.ensure_default, user_id=user_id
+                )
+                profile_id = destination_profile.id
+            else:
+                destination_profile = await asyncio.to_thread(
+                    profile_store.get, profile_id, user_id=user_id
+                )
+                if destination_profile is None:
+                    raise OmnigentError("Profile not found", code=ErrorCode.NOT_FOUND)
+        if profile_id is not None and not profile_is_accessible(
+            profile_id, request.headers.get(PROFILE_UNLOCK_HEADER)
+        ):
+            raise OmnigentError("Profile not found", code=ErrorCode.NOT_FOUND)
+        protected_profile = (
+            get_profile_protection_by_id(profile_id) if profile_id is not None else None
+        )
+        profile_host_id = (
+            protected_profile.host_id
+            if protected_profile is not None
+            else (destination_profile.config.get("host_id") if destination_profile else None)
+        )
+        if profile_host_id is not None and not isinstance(profile_host_id, str):
+            raise OmnigentError(
+                "Profile host_id must be a string.",
+                code=ErrorCode.INVALID_INPUT,
+            )
+        if body.workspace is not None:
+            workspace_owner = protected_profile_for_workspace(
+                body.workspace,
+                host_id=profile_host_id,
+            )
+            if workspace_owner is not None and workspace_owner != profile_id:
+                raise OmnigentError(
+                    "This workspace belongs to another private profile.",
+                    code=ErrorCode.INVALID_INPUT,
+                )
+            if (
+                profile_id is not None
+                and protected_profile is not None
+                and not workspace_belongs_to_profile(
+                    profile_id,
+                    body.workspace,
+                    host_id=profile_host_id,
+                )
+            ):
+                raise OmnigentError(
+                    "A private profile's workspace must be inside one of its protected roots.",
+                    code=ErrorCode.INVALID_INPUT,
+                )
         items = [item.to_item() for item in body.items]
         existing = await asyncio.to_thread(
             conversation_store.find_imported_conversation,
@@ -362,6 +437,10 @@ def create_imports_router(
                 permission_store,
                 conversation_store,
             )
+            if existing.profile_id is not None and not profile_is_accessible(
+                existing.profile_id, request.headers.get(PROFILE_UNLOCK_HEADER)
+            ):
+                raise OmnigentError("Session not found", code=ErrorCode.NOT_FOUND)
             if not body.force:
                 raise OmnigentError(
                     f"This {body.source} session has already been imported as {existing.id}",
@@ -379,6 +458,8 @@ def create_imports_router(
             user_id=user_id,
             native_title=body.title,
             project_id=body.project_id,
+            profile_id=profile_id,
+            profile_host_id=profile_host_id,
         )
 
         response.status_code = 201

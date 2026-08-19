@@ -21,12 +21,25 @@ import {
   parseTerminalClipboardMessage,
   sgrWheelReports,
   terminalTheme,
+  terminalWebSocketProtocols,
   terminalKeyEventPayload,
   type ConnectionState,
   wheelReportPayload,
   type WheelMouseState,
   type WheelScreenMetrics,
 } from "./TerminalSession";
+
+describe("terminalWebSocketProtocols", () => {
+  it("carries a private-profile unlock bearer without putting it in the URL", () => {
+    expect(terminalWebSocketProtocols("unlock-token")).toEqual([
+      "omnigent.profile-unlock.unlock-token",
+    ]);
+  });
+
+  it("does not request a subprotocol for an ordinary profile", () => {
+    expect(terminalWebSocketProtocols(null)).toBeUndefined();
+  });
+});
 
 describe("openTerminalLink", () => {
   afterEach(() => {

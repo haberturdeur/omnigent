@@ -64,6 +64,7 @@ def test_projects_indexes_at_head(db_engine: Engine) -> None:
     assert indexes["ix_projects_user_id"]["column_names"] == [
         "workspace_id",
         "user_id",
+        "profile_id",
         "created_at",
         "id",
     ]
@@ -89,8 +90,11 @@ def test_downgrade_restores_owner_user_id(tmp_path: Path) -> None:
     with engine.connect() as conn:
         conn.execute(
             sa.text(
-                "INSERT INTO projects (workspace_id, id, name, user_id, created_at, updated_at) "
-                f"VALUES (0, X'{_PROJECT_ID}', 'launch', 'alice@example.com', 1700000000, NULL)"
+                "INSERT INTO projects "
+                "(workspace_id, id, name, user_id, owner_is_anonymous, owner_scope, "
+                "profile_id, profile_unassigned_slot, created_at, updated_at) "
+                f"VALUES (0, X'{_PROJECT_ID}', 'launch', 'alice@example.com', false, "
+                "'alice@example.com', NULL, 1, 1700000000, NULL)"
             )
         )
         conn.commit()
@@ -178,6 +182,10 @@ def test_config_round_trips_through_the_compressed_column(db_engine: Engine) -> 
                 id=_PROJECT_ID,
                 name="launch",
                 user_id="alice@example.com",
+                owner_is_anonymous=False,
+                owner_scope="alice@example.com",
+                profile_id=None,
+                profile_unassigned_slot=1,
                 created_at=1700000000,
                 updated_at=None,
                 config=payload,
@@ -223,6 +231,10 @@ def test_downgrade_restores_plaintext_config(tmp_path: Path) -> None:
                 id=_PROJECT_ID,
                 name="launch",
                 user_id="alice@example.com",
+                owner_is_anonymous=False,
+                owner_scope="alice@example.com",
+                profile_id=None,
+                profile_unassigned_slot=1,
                 created_at=1700000000,
                 updated_at=None,
                 config=payload,

@@ -73,6 +73,16 @@ from omnigent.server.background_session_titles import (
 )
 from omnigent.server.host_registry import HostRegistry, RunnerExitReports
 from omnigent.server.permissions import check_session_access
+from omnigent.server.profile_protection import (
+    PROFILE_UNLOCK_HEADER,
+    get_profile_protection_by_id,
+    profile_is_accessible,
+    profile_isolation_snapshot,
+    profile_membership_write,
+    protected_profile_for_workspace,
+    read_protected_profiles,
+    workspace_belongs_to_profile,
+)
 from omnigent.server.routes._auth_helpers import (
     get_permission_level as _get_permission_level,
 )
@@ -122,6 +132,7 @@ from omnigent.server.routes._sessions.helpers import (
     _get_runner_client,
     _invalidate_runner_backed_snapshot_state,
     _merge_claude_permission_launch_args,
+    _merge_codex_permission_launch_args,
     _multipart_missing_detail,
     _native_coding_agent_for_agent,
     _notify_runner_of_bundled_child,
@@ -135,6 +146,7 @@ from omnigent.server.routes._sessions.helpers import (
     _publish_terminal_pending,
     _reject_reserved_cost_control_label_seed,
     _reject_server_reserved_label_seed,
+    _require_codex_approval_mode_forward,
     _require_collaboration_mode_forward,
     _require_cost_control_label_authority,
     _require_permission_mode_forward,
@@ -188,17 +200,43 @@ from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.artifact_store import ArtifactStore
 from omnigent.stores.comment_store import CommentStore
 from omnigent.stores.conversation_store import (
-    CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY as _CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY,
-)
-from omnigent.stores.conversation_store import (
+    CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY,
     PINNED_LABEL_KEY,
     PROJECT_LABEL_KEY,
     ConversationNotFoundError,
+    ConversationProfileChangedError,
+    ConversationProjectProfileMismatchError,
+    ConversationTreeChangedError,
     pinned_label_key,
 )
 from omnigent.stores.file_store import FileStore
 from omnigent.stores.permission_store import PermissionStore
-from omnigent.stores.project_store import ProjectStore
+from omnigent.stores.profile_store import ProfileStore
+from omnigent.stores.project_store import ProjectSessionProfileMismatchError, ProjectStore
+
+_CODEX_RUNTIME_APPROVAL_PRESETS: dict[str, list[str]] = {
+    "default": ["--sandbox", "workspace-write", "--ask-for-approval", "on-request"],
+    "read-only": ["--sandbox", "read-only", "--ask-for-approval", "on-request"],
+    "full-access": ["--sandbox", "danger-full-access", "--ask-for-approval", "never"],
+}
+
+_DESTINATION_PROFILE_UNLOCK_HEADER = "X-Omnigent-Destination-Profile-Unlock"
+
+
+def _move_sessions_with_profile_guard(
+    conversation_store: ConversationStore,
+    conversation_ids: tuple[str, ...],
+    *,
+    expected_profile_id: str | None,
+    destination_profile_id: str,
+) -> bool:
+    ids = tuple(item for item in (expected_profile_id, destination_profile_id) if item is not None)
+    with profile_membership_write(ids):
+        return conversation_store.move_conversations_to_profile(
+            conversation_ids,
+            expected_profile_id=expected_profile_id,
+            destination_profile_id=destination_profile_id,
+        )
 
 
 def register_core_routes(
@@ -218,6 +256,7 @@ def register_core_routes(
     runner_exit_reports: RunnerExitReports | None = None,
     host_registry: HostRegistry | None = None,
     project_store: ProjectStore | None = None,
+    profile_store: ProfileStore | None = None,
     background_title_coordinator: BackgroundSessionTitleCoordinator | None = None,
 ) -> None:
     """Register the core session routes on router."""
@@ -421,6 +460,7 @@ def register_core_routes(
             artifact_store=artifact_store,
             background_title_coordinator=background_title_coordinator,
             project_store=project_store,
+            profile_store=profile_store,
         )
         # Notify the runner about the new session so it can resolve
         # the spec and cache sub_agent_name before the first turn.
@@ -550,6 +590,10 @@ def register_core_routes(
                         "schema constraint should have prevented this",
                         code=ErrorCode.INTERNAL_ERROR,
                     )
+                isolation_generation, isolation_masks = profile_isolation_snapshot(
+                    resp.workspace,
+                    host_id=launch_host_id,
+                )
                 launch_frame = encode_host_frame(
                     HostLaunchRunnerFrame(
                         request_id=request_id,
@@ -561,6 +605,9 @@ def register_core_routes(
                         # spawning. None (agent not resolvable) skips the
                         # host-side check.
                         harness=resp.harness,
+                        isolation_generation=isolation_generation,
+                        isolation_host_id=launch_host_id,
+                        isolation_masks=[str(path) for path in isolation_masks],
                     )
                 )
                 host_registry.send_text(conn, launch_frame)
@@ -591,6 +638,24 @@ def register_core_routes(
                     # spinner. No-op when we never set it.
                     if _terminal_first_create:
                         _publish_terminal_pending(resp.id, False)
+                else:
+                    from omnigent.server.routes._sessions.helpers import (
+                        _stop_stale_host_launch,
+                    )
+
+                    if await _stop_stale_host_launch(
+                        session_id=resp.id,
+                        host_id=launch_host_id,
+                        runner_id=runner_id,
+                        launch_generation=isolation_generation,
+                        host_registry=host_registry,
+                    ):
+                        launch_result = {
+                            "status": "failed",
+                            "error": ("private-profile protection changed during runner launch"),
+                        }
+                        if _terminal_first_create:
+                            _publish_terminal_pending(resp.id, False)
                 resp.runner_id = runner_id
                 resp.host_id = launch_host_id
 
@@ -663,6 +728,57 @@ def register_core_routes(
                 conversation_store=conversation_store,
                 runner_router=runner_router,
             )
+            parent = await asyncio.to_thread(
+                conversation_store.get_conversation, parsed_metadata.parent_session_id
+            )
+            if parent is not None:
+                if (
+                    parsed_metadata.profile_id is not None
+                    and parsed_metadata.profile_id != parent.profile_id
+                ):
+                    raise OmnigentError(
+                        "A sub-agent must use its parent session's profile",
+                        code=ErrorCode.INVALID_INPUT,
+                    )
+                parsed_metadata = parsed_metadata.model_copy(
+                    update={"profile_id": parent.profile_id}
+                )
+        elif profile_store is not None:
+            profile_id = parsed_metadata.profile_id
+            if profile_id is None:
+                profile = await asyncio.to_thread(profile_store.ensure_default, user_id=user_id)
+                profile_id = profile.id
+            elif await asyncio.to_thread(profile_store.get, profile_id, user_id=user_id) is None:
+                raise OmnigentError("Profile not found", code=ErrorCode.NOT_FOUND)
+            parsed_metadata = parsed_metadata.model_copy(update={"profile_id": profile_id})
+
+        if parsed_metadata.profile_id is not None and not profile_is_accessible(
+            parsed_metadata.profile_id, request.headers.get(PROFILE_UNLOCK_HEADER)
+        ):
+            raise OmnigentError("Profile not found", code=ErrorCode.NOT_FOUND)
+        if parsed_metadata.workspace is not None:
+            workspace_owner = protected_profile_for_workspace(
+                parsed_metadata.workspace,
+                host_id=parsed_metadata.host_id,
+            )
+            if workspace_owner is not None and workspace_owner != parsed_metadata.profile_id:
+                raise OmnigentError(
+                    "This workspace belongs to another private profile.",
+                    code=ErrorCode.INVALID_INPUT,
+                )
+            if (
+                parsed_metadata.profile_id is not None
+                and get_profile_protection_by_id(parsed_metadata.profile_id) is not None
+                and not workspace_belongs_to_profile(
+                    parsed_metadata.profile_id,
+                    parsed_metadata.workspace,
+                    host_id=parsed_metadata.host_id,
+                )
+            ):
+                raise OmnigentError(
+                    "A private profile's workspace must be inside one of its protected roots.",
+                    code=ErrorCode.INVALID_INPUT,
+                )
 
         bundle_bytes = await bundle.read()
         result = await asyncio.to_thread(
@@ -719,6 +835,7 @@ def register_core_routes(
     @router.get("/sessions/projects")
     async def list_session_projects(
         request: Request,
+        profile_id: str | None = Query(default=None),
     ) -> list[SessionProjectSummary]:
         """
         Return the caller's projects as ``{"id", "name"}`` pairs, ordered
@@ -740,12 +857,25 @@ def register_core_routes(
         :returns: List of :class:`SessionProjectSummary` ordered by name.
         """
         user_id = _require_user(request, auth_provider)
+        if profile_id is not None and profile_store is not None:
+            profile = await asyncio.to_thread(profile_store.get, profile_id, user_id=user_id)
+            if profile is None:
+                raise OmnigentError("Profile not found", code=ErrorCode.NOT_FOUND)
+            if not profile_is_accessible(profile_id, request.headers.get(PROFILE_UNLOCK_HEADER)):
+                raise OmnigentError("Profile not found", code=ErrorCode.NOT_FOUND)
 
         def _list_union() -> list[SessionProjectSummary]:
             # First-class first so its id wins when a name exists in both.
             by_name: dict[str, SessionProjectSummary] = {}
+            unlock_token = request.headers.get(PROFILE_UNLOCK_HEADER)
+
+            def _visible(candidate: str | None) -> bool:
+                return candidate is None or profile_is_accessible(candidate, unlock_token)
+
             if project_store is not None:
-                for proj in project_store.list(user_id=user_id):
+                for proj in project_store.list(user_id=user_id, profile_id=profile_id):
+                    if not _visible(proj.profile_id):
+                        continue
                     icon = proj.config.get("icon")
                     by_name[proj.name] = SessionProjectSummary(
                         id=proj.id,
@@ -753,8 +883,18 @@ def register_core_routes(
                         icon=icon if isinstance(icon, str) else None,
                     )
             # Legacy path: label-derived projects (id=None unless already first-class).
-            for name in conversation_store.list_projects(owned_by=user_id):
-                by_name.setdefault(name, SessionProjectSummary(id=None, name=name))
+            visible_profile_ids = [profile_id]
+            if profile_id is None and profile_store is not None:
+                visible_profile_ids = [
+                    profile.id
+                    for profile in profile_store.list(user_id=user_id)
+                    if _visible(profile.id)
+                ]
+            for visible_profile_id in visible_profile_ids:
+                for name in conversation_store.list_projects(
+                    owned_by=user_id, profile_id=visible_profile_id
+                ):
+                    by_name.setdefault(name, SessionProjectSummary(id=None, name=name))
             return [by_name[name] for name in sorted(by_name)]
 
         return await asyncio.to_thread(_list_union)
@@ -931,6 +1071,7 @@ def register_core_routes(
         kind: str = Query(default="default", pattern="^(default|sub_agent|any)$"),
         project: str | None = Query(default=None),
         pinned: bool = Query(default=False),
+        profile_id: str | None = Query(default=None),
     ) -> PaginatedList:
         """
         List sessions with cursor-based pagination.
@@ -993,6 +1134,12 @@ def register_core_routes(
         # with 401 instead (user_id stays None only when auth is
         # disabled entirely — no auth_provider).
         user_id = _require_user(request, auth_provider)
+        if profile_id is not None and profile_store is not None:
+            profile = await asyncio.to_thread(profile_store.get, profile_id, user_id=user_id)
+            if profile is None:
+                raise OmnigentError("Profile not found", code=ErrorCode.NOT_FOUND)
+            if not profile_is_accessible(profile_id, request.headers.get(PROFILE_UNLOCK_HEADER)):
+                raise OmnigentError("Profile not found", code=ErrorCode.NOT_FOUND)
         normalized_query = search_query if search_query else None
         # A specific project folder ("My sessions"-only) must show only the
         # viewer's own sessions — a session shared with them but filed under a
@@ -1002,6 +1149,12 @@ def register_core_routes(
         # The flat list (project=None) and Unfiled (project="") stay unscoped so
         # shared sessions still surface for the "Shared with me" tab.
         owned_by = user_id if project else None
+        unlock_token = request.headers.get(PROFILE_UNLOCK_HEADER)
+        excluded_profile_ids = frozenset(
+            profile.profile_id
+            for profile in read_protected_profiles()
+            if not profile_is_accessible(profile.profile_id, unlock_token)
+        )
         page = await asyncio.to_thread(
             conversation_store.list_conversations,
             limit=limit,
@@ -1024,6 +1177,8 @@ def register_core_routes(
             pinned=pinned,
             # Pins are per-user: filter to the caller's own pin key.
             pinned_owner=user_id,
+            profile_id=profile_id,
+            exclude_profile_ids=(excluded_profile_ids if profile_id is None else None),
         )
         # list_conversations may return rows with agent_id=None for
         # legacy conversations; skip them before building the batch IDs.
@@ -1124,6 +1279,7 @@ def register_core_routes(
     async def _fetch_watched_items(
         watched: list[str],
         user_id: str | None,
+        profile_unlock: str | None,
     ) -> list[dict[str, Any]]:
         """
         Build current list-item payloads for the watched ids.
@@ -1185,6 +1341,24 @@ def register_core_routes(
             ]
 
         convs = await asyncio.to_thread(_load_sessions, accessible)
+        convs = [
+            conversation
+            for conversation in convs
+            if conversation.profile_id is None
+            or (
+                permission_store is not None
+                and (
+                    level := _permission_level_from_grants(
+                        user_id,
+                        perms_by_conv.get(conversation.id, []),
+                        user_is_admin,
+                    )
+                )
+                is not None
+                and level < LEVEL_OWNER
+            )
+            or profile_is_accessible(conversation.profile_id, profile_unlock)
+        ]
         if not convs:
             return []
         unique_agent_ids = list({c.agent_id for c in convs if c.agent_id is not None})
@@ -1276,6 +1450,7 @@ def register_core_routes(
         await websocket.accept()
 
         watched: list[str] = []
+        profile_unlock: str | None = None
         # Last SessionListItem dump sent per id, used to diff. Keyed only
         # by currently-watched ids; pruned when the watch-set narrows.
         last_sent: dict[str, dict[str, Any]] = {}
@@ -1309,7 +1484,7 @@ def register_core_routes(
         async def _emit_snapshot() -> None:
             """Send a full snapshot for the current watch-set and reset the
             diff baseline to it."""
-            items = await _fetch_watched_items(watched, user_id)
+            items = await _fetch_watched_items(watched, user_id, profile_unlock)
             dumps = {item["id"]: item for item in items}
             last_sent.clear()
             last_sent.update(dumps)
@@ -1321,7 +1496,7 @@ def register_core_routes(
             been idle."""
             nonlocal last_send_monotonic
             if watched:
-                items = await _fetch_watched_items(watched, user_id)
+                items = await _fetch_watched_items(watched, user_id, profile_unlock)
                 current = {item["id"]: item for item in items}
                 changed = [dump for cid, dump in current.items() if last_sent.get(cid) != dump]
                 # Removed = a still-watched id that no longer resolves (lost
@@ -1341,7 +1516,7 @@ def register_core_routes(
 
         async def _reader() -> None:
             """Apply incoming watch-set updates and snapshot each one."""
-            nonlocal watched
+            nonlocal profile_unlock, watched
             while True:
                 raw = await websocket.receive_text()
                 try:
@@ -1354,6 +1529,11 @@ def register_core_routes(
                 ids = msg.get("session_ids")
                 if not isinstance(ids, list):
                     continue
+                profile_unlock = (
+                    msg.get("profile_unlock")
+                    if isinstance(msg.get("profile_unlock"), str)
+                    else None
+                )
                 # Dedupe preserving order, keep only strings. Dedupe fully
                 # first, then cap — so the truncation count below is the real
                 # number of distinct ids dropped, not skewed by duplicates that
@@ -1450,7 +1630,7 @@ def register_core_routes(
                         if sid in watched:
                             continue
                         try:
-                            items = await _fetch_watched_items([sid], user_id)
+                            items = await _fetch_watched_items([sid], user_id, profile_unlock)
                             if items:
                                 await _send({"type": "changed", "items": items})
                         except WebSocketDisconnect:
@@ -1626,18 +1806,129 @@ def register_core_routes(
         # Owner implies edit, so a single check at the resolved level gates all
         # three with no redundant second permission-store read.
         set_project = "project_id" in body.model_fields_set
+        set_profile = "profile_id" in body.model_fields_set
         pin_only = body.model_fields_set == {"labels"} and set(body.labels or {}) == {
             PINNED_LABEL_KEY
         }
         if pin_only:
             required_level = LEVEL_READ
-        elif body.archived is not None or set_project:
+        elif body.archived is not None or set_project or set_profile:
             required_level = LEVEL_OWNER
         else:
             required_level = LEVEL_EDIT
         await _require_access(
             user_id, session_id, required_level, permission_store, conversation_store
         )
+        profile_move_ids: tuple[str, ...] = ()
+        source_profile_id: str | None = None
+        if set_profile:
+            destination_profile_id = body.profile_id
+            if destination_profile_id is None:
+                raise OmnigentError(
+                    "profile_id must be a profile id; omit the field to leave it unchanged",
+                    code=ErrorCode.INVALID_INPUT,
+                )
+            if profile_store is None:
+                raise OmnigentError(
+                    "Moving sessions between profiles is not supported by this server",
+                    code=ErrorCode.INVALID_INPUT,
+                )
+            current = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+            if current is None:
+                raise _session_not_found()
+            if current.parent_conversation_id is not None:
+                raise OmnigentError(
+                    "Move the top-level session instead of an individual sub-agent session",
+                    code=ErrorCode.INVALID_INPUT,
+                )
+            source_profile_id = current.profile_id
+            if source_profile_id is not None and not profile_is_accessible(
+                source_profile_id,
+                request.headers.get(PROFILE_UNLOCK_HEADER),
+            ):
+                raise _session_not_found()
+            destination = await asyncio.to_thread(
+                profile_store.get,
+                destination_profile_id,
+                user_id=user_id,
+            )
+            if destination is None or not profile_is_accessible(
+                destination_profile_id,
+                request.headers.get(_DESTINATION_PROFILE_UNLOCK_HEADER),
+            ):
+                raise OmnigentError("Profile not found", code=ErrorCode.NOT_FOUND)
+            if profile_store.storage_location != conversation_store.storage_location:
+                raise OmnigentError(
+                    "Moving sessions requires profiles and sessions to share storage.",
+                    code=ErrorCode.CONFLICT,
+                )
+
+            pending = [session_id]
+            tree_ids: list[str] = []
+            while pending:
+                tree_ids.extend(pending)
+                children = await asyncio.to_thread(
+                    conversation_store.list_child_conversation_ids_by_parent,
+                    pending,
+                )
+                pending = [child_id for parent_id in pending for child_id in children[parent_id]]
+            tree = await asyncio.to_thread(conversation_store.get_conversations, tree_ids)
+            if len(tree) != len(tree_ids):
+                raise _session_not_found()
+            source_is_private = source_profile_id is not None and (
+                get_profile_protection_by_id(source_profile_id) is not None
+            )
+            destination_is_private = (
+                get_profile_protection_by_id(destination_profile_id) is not None
+            )
+            destination_protection = get_profile_protection_by_id(destination_profile_id)
+            crosses_private_boundary = source_is_private or destination_is_private
+            for member in tree.values():
+                if member.profile_id != source_profile_id:
+                    raise OmnigentError(
+                        "Session membership changed while it was being moved; retry the request.",
+                        code=ErrorCode.CONFLICT,
+                    )
+                if member.project_id is not None:
+                    raise OmnigentError(
+                        "This session belongs to a project; move the project instead.",
+                        code=ErrorCode.CONFLICT,
+                    )
+                if (
+                    crosses_private_boundary
+                    and member.runner_id is not None
+                    and runner_router is not None
+                    and runner_router.runner_is_online(member.runner_id)
+                ):
+                    raise OmnigentError(
+                        "Stop the session before moving it into or out of a private profile.",
+                        code=ErrorCode.CONFLICT,
+                    )
+                if member.workspace is None:
+                    continue
+                workspace_owner = protected_profile_for_workspace(
+                    member.workspace,
+                    host_id=member.host_id,
+                )
+                if workspace_owner is not None and workspace_owner != destination_profile_id:
+                    raise OmnigentError(
+                        "The session workspace belongs to another private profile.",
+                        code=ErrorCode.INVALID_INPUT,
+                    )
+                if destination_protection is not None and (
+                    member.host_id != destination_protection.host_id
+                    or not workspace_belongs_to_profile(
+                        destination_profile_id,
+                        member.workspace,
+                        host_id=member.host_id,
+                    )
+                ):
+                    raise OmnigentError(
+                        "A private profile's workspace must be inside one of its protected roots.",
+                        code=ErrorCode.INVALID_INPUT,
+                    )
+            if destination_profile_id != source_profile_id:
+                profile_move_ids = tuple(tree_ids)
         if body.runner_id is not None and permission_store is not None:
             if not check_session_access(
                 user_id, session_id, LEVEL_OWNER, permission_store, conversation_store
@@ -1724,6 +2015,37 @@ def register_core_routes(
                     code=ErrorCode.INVALID_INPUT,
                 )
             requested_claude_permission_mode = body.permission_mode
+
+        approval_mode_requested = "codex_approval_mode" in body.model_fields_set
+        requested_codex_approval_mode: str | None = None
+        conv_for_approval_mode: Conversation | None = None
+        if approval_mode_requested:
+            if body.codex_approval_mode not in _CODEX_RUNTIME_APPROVAL_PRESETS:
+                raise OmnigentError(
+                    "codex_approval_mode must be one of "
+                    f"{sorted(_CODEX_RUNTIME_APPROVAL_PRESETS)}",
+                    code=ErrorCode.INVALID_INPUT,
+                )
+            if body.terminal_launch_args is not None:
+                raise OmnigentError(
+                    "codex_approval_mode cannot be combined with terminal_launch_args",
+                    code=ErrorCode.INVALID_INPUT,
+                )
+            conv_for_approval_mode = await asyncio.to_thread(
+                conversation_store.get_conversation,
+                session_id,
+            )
+            if conv_for_approval_mode is None:
+                raise _session_not_found()
+            if (
+                conv_for_approval_mode.labels.get(_CLAUDE_NATIVE_WRAPPER_LABEL_KEY)
+                != _CODEX_NATIVE_WRAPPER_LABEL_VALUE
+            ):
+                raise OmnigentError(
+                    "codex_approval_mode is only supported for codex-native sessions",
+                    code=ErrorCode.INVALID_INPUT,
+                )
+            requested_codex_approval_mode = body.codex_approval_mode
         labels_to_set = dict(body.labels or {})
         # Pins are per-user. The client writes the canonical ``omnigent.pinned``
         # key; rewrite it to the caller's per-user key so one user's pin doesn't
@@ -1884,7 +2206,7 @@ def register_core_routes(
                     conversation_store,
                 )
         else:
-            conv = conv_for_collaboration_mode
+            conv = conv_for_collaboration_mode or conv_for_approval_mode
             if conv is None:
                 conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
             if conv is None:
@@ -1893,6 +2215,31 @@ def register_core_routes(
                 raise OmnigentError(
                     "Not a session (no agent binding)",
                     code=ErrorCode.NOT_FOUND,
+                )
+
+        live_forward = not body.silent
+        if requested_codex_approval_mode is not None:
+            if conv is None:
+                raise _session_not_found()
+            terminal_launch_args = _validate_terminal_launch_args(
+                _merge_codex_permission_launch_args(
+                    conv.terminal_launch_args,
+                    _CODEX_RUNTIME_APPROVAL_PRESETS[requested_codex_approval_mode],
+                )
+            )
+            if live_forward:
+                approval_forward = await _forward_session_change_to_runner(
+                    session_id,
+                    runner_router,
+                    {
+                        "type": "codex_approval_mode_change",
+                        "approval_mode": requested_codex_approval_mode,
+                    },
+                )
+                _require_codex_approval_mode_forward(
+                    session_id,
+                    requested_codex_approval_mode,
+                    approval_forward,
                 )
 
         updated = await asyncio.to_thread(
@@ -1914,6 +2261,34 @@ def register_core_routes(
         )
         if updated is None:
             raise _session_not_found()
+        if profile_move_ids:
+            assert body.profile_id is not None
+            try:
+                moved = await asyncio.to_thread(
+                    _move_sessions_with_profile_guard,
+                    conversation_store,
+                    profile_move_ids,
+                    expected_profile_id=source_profile_id,
+                    destination_profile_id=body.profile_id,
+                )
+            except (
+                ConversationProfileChangedError,
+                ConversationProjectProfileMismatchError,
+                ConversationTreeChangedError,
+            ) as exc:
+                raise OmnigentError(
+                    "Session membership changed while it was being moved; retry the request.",
+                    code=ErrorCode.CONFLICT,
+                ) from exc
+            if not moved:
+                raise _session_not_found()
+        if requested_codex_approval_mode is not None:
+            await asyncio.to_thread(
+                conversation_store.delete_label,
+                session_id,
+                CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY,
+            )
+            updated.labels.pop(CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY, None)
         # Archiving hides the session from the default view (and its unread
         # dot), so drop its per-user read-state to bound in-memory growth.
         # Only on archive→true; unarchiving leaves it pruned (reads as seen).
@@ -1945,7 +2320,6 @@ def register_core_routes(
         # command into tmux, other harnesses 204 no-op). See
         # ``_forward_session_change_to_runner`` for the shared
         # runner-client fallback + non-2xx logging.
-        live_forward = not body.silent
         if live_forward and (effort is not None or clear_effort):
             await _forward_session_change_to_runner(
                 session_id,
@@ -2042,10 +2416,14 @@ def register_core_routes(
         # so without this an empty string would linger as a stored value.
         # The pinned key was rewritten to the caller's per-user key above, so
         # clear that one (not the canonical bare key) on an empty value.
+        clear_project_label = labels_to_set.get(PROJECT_LABEL_KEY) == ""
         for _clear_key in (PROJECT_LABEL_KEY, pinned_label_key(user_id)):
             if labels_to_set.get(_clear_key) == "":
                 labels_to_set = {k: v for k, v in labels_to_set.items() if k != _clear_key}
-                await asyncio.to_thread(conversation_store.delete_label, session_id, _clear_key)
+                if _clear_key != PROJECT_LABEL_KEY or not set_project:
+                    await asyncio.to_thread(
+                        conversation_store.delete_label, session_id, _clear_key
+                    )
         if labels_to_set:
             await asyncio.to_thread(conversation_store.set_labels, session_id, labels_to_set)
         # Only when the switch was forwarded: a silent PATCH writes no label,
@@ -2107,10 +2485,37 @@ def register_core_routes(
                     code=ErrorCode.INVALID_INPUT,
                 )
             target_project_id = body.project_id
-            if target_project_id == "":
-                unfiled = await asyncio.to_thread(
-                    conversation_store.set_conversation_project, session_id, None
+            legacy_label_is_colocated = (
+                project_store is not None
+                and project_store.storage_location
+                == (
+                    conversation_store.conversation_storage_location
+                    or conversation_store.storage_location
                 )
+            )
+
+            def clear_legacy_label_fallback() -> None:
+                conversation_store.delete_label(session_id, PROJECT_LABEL_KEY)
+
+            if target_project_id == "":
+                if project_store is not None:
+                    unfiled = await asyncio.to_thread(
+                        project_store.unfile_session,
+                        session_id,
+                        clear_legacy_label=clear_project_label,
+                        legacy_label_is_colocated=legacy_label_is_colocated,
+                        clear_legacy_label_fallback=(
+                            clear_legacy_label_fallback
+                            if clear_project_label and not legacy_label_is_colocated
+                            else None
+                        ),
+                    )
+                else:
+                    unfiled = await asyncio.to_thread(
+                        conversation_store.set_conversation_project, session_id, None
+                    )
+                    if unfiled and clear_project_label:
+                        await asyncio.to_thread(clear_legacy_label_fallback)
                 if not unfiled:
                     raise _session_not_found()
             else:
@@ -2119,18 +2524,27 @@ def register_core_routes(
                         "Filing a session into a project is not supported by this server",
                         code=ErrorCode.INVALID_INPUT,
                     )
-                owned = await asyncio.to_thread(
-                    project_store.get, target_project_id, user_id=user_id
-                )
-                if owned is None:
-                    raise OmnigentError("Project not found", code=ErrorCode.NOT_FOUND)
-                filed = await asyncio.to_thread(
-                    conversation_store.set_conversation_project,
-                    session_id,
-                    target_project_id,
-                )
+                try:
+                    filed = await asyncio.to_thread(
+                        project_store.file_session,
+                        target_project_id,
+                        session_id,
+                        user_id=user_id,
+                        clear_legacy_label=clear_project_label,
+                        legacy_label_is_colocated=legacy_label_is_colocated,
+                        clear_legacy_label_fallback=(
+                            clear_legacy_label_fallback
+                            if clear_project_label and not legacy_label_is_colocated
+                            else None
+                        ),
+                    )
+                except ProjectSessionProfileMismatchError as exc:
+                    raise OmnigentError(
+                        "A project and session must belong to the same profile",
+                        code=ErrorCode.CONFLICT,
+                    ) from exc
                 if not filed:
-                    raise _session_not_found()
+                    raise OmnigentError("Project not found", code=ErrorCode.NOT_FOUND)
         level = await _get_permission_level(user_id, session_id, permission_store)
         # PATCH callers consume only the snapshot's scalar fields (clients
         # hydrate transcripts via GET /sessions/{id}/items), so skip the
@@ -2340,7 +2754,7 @@ def register_core_routes(
         if launch_args_set:
             dropped_label_keys_set |= {
                 _CLAUDE_NATIVE_PERMISSION_MODE_LABEL_KEY,
-                _CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY,
+                CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY,
             }
         # The claude-native permission-mode label is Claude-specific; on an
         # agent switch (which already drops the source's launch args) it would
@@ -2365,7 +2779,7 @@ def register_core_routes(
                     "codex_bypass_sandbox is only valid for a codex-native fork target",
                     code=ErrorCode.INVALID_INPUT,
                 )
-            extra_labels[_CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY] = "1"
+            extra_labels[CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY] = "1"
 
         # When the fork binds a NATIVE target, the native CLI won't replay
         # the copied Omnigent transcript on its own — mark the fork so the
@@ -2489,6 +2903,7 @@ def register_core_routes(
                 presentation_labels=presentation_labels,
                 up_to_response_id=body.up_to_response_id,
                 project_id=fork_project_id,
+                profile_id=source.profile_id,
             )
         except LookupError as exc:
             raise OmnigentError(

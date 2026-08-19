@@ -4,6 +4,7 @@ import {
   nextPushedSession,
   sessionUpdatesSocket,
 } from "./sessionUpdatesSocket";
+import { setProfileUnlockToken, setUnlockActiveProfile } from "./profileUnlock";
 
 // Minimal stand-in for the browser WebSocket: records sends/closes and lets
 // the test drive the lifecycle (open, message) by hand. A real socket can't be
@@ -20,6 +21,7 @@ class FakeWebSocket {
   onerror: (() => void) | null = null;
   onclose: (() => void) | null = null;
   closeCount = 0;
+  sent: string[] = [];
   readonly url: string;
 
   constructor(url: string) {
@@ -29,8 +31,8 @@ class FakeWebSocket {
     FakeWebSocket.instances.push(this);
   }
 
-  send(): void {
-    // The watch-set send is irrelevant to the watchdog; ignore it.
+  send(payload: string): void {
+    this.sent.push(payload);
   }
 
   close(): void {
@@ -69,6 +71,8 @@ describe("sessionUpdatesSocket heartbeat watchdog", () => {
     // Tear down the shared singleton's connection + timers so cases don't leak
     // into each other, then restore real timers/globals.
     sessionUpdatesSocket.stop();
+    setProfileUnlockToken("profile-a", null);
+    setUnlockActiveProfile(null);
     vi.clearAllTimers();
     vi.unstubAllGlobals();
     vi.useRealTimers();
@@ -119,6 +123,23 @@ describe("sessionUpdatesSocket heartbeat watchdog", () => {
     vi.advanceTimersByTime(1);
     expect(ws.closeCount).toBe(1);
     expect(sessionUpdatesSocket.isConnected()).toBe(false);
+  });
+
+  it("resends the watch when the active profile unlock token changes", () => {
+    setUnlockActiveProfile("profile-a");
+    sessionUpdatesSocket.start();
+    const ws = latestWs();
+    ws.open();
+    sessionUpdatesSocket.setWatched(["conv-a"]);
+    const before = ws.sent.length;
+
+    setProfileUnlockToken("profile-a", "fresh-token");
+
+    expect(ws.sent).toHaveLength(before + 1);
+    expect(JSON.parse(ws.sent.at(-1) ?? "{}")).toMatchObject({
+      session_ids: ["conv-a"],
+      profile_unlock: "fresh-token",
+    });
   });
 });
 

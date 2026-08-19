@@ -34,6 +34,8 @@ from omnigent.host.frames import (
     HostListWorktreesResultFrame,
     HostModelOptionsFrame,
     HostModelOptionsResultFrame,
+    HostMoveDirFrame,
+    HostMoveDirResultFrame,
     HostRemoveWorktreeFrame,
     HostRemoveWorktreeResultFrame,
     HostRunnerExitedFrame,
@@ -250,6 +252,9 @@ def test_launch_runner_frame_round_trip() -> None:
         binding_token="secret_token_xyz",
         workspace="/Users/corey/projects/frontend",
         session_id="conv_abc123",
+        isolation_generation=7,
+        isolation_host_id="host-a",
+        isolation_masks=["/srv/private-a", "/srv/private-b"],
     )
     decoded = decode_host_frame(encode_host_frame(original))
     assert isinstance(decoded, HostLaunchRunnerFrame)
@@ -257,6 +262,9 @@ def test_launch_runner_frame_round_trip() -> None:
     assert decoded.binding_token == "secret_token_xyz"
     assert decoded.workspace == "/Users/corey/projects/frontend"
     assert decoded.session_id == "conv_abc123"
+    assert decoded.isolation_generation == 7
+    assert decoded.isolation_host_id == "host-a"
+    assert decoded.isolation_masks == ["/srv/private-a", "/srv/private-b"]
 
 
 def test_launch_runner_result_frame_success_round_trip() -> None:
@@ -1315,6 +1323,24 @@ def test_create_dir_result_error_round_trip() -> None:
     assert decoded.status == "ok"
     assert decoded.path is None
     assert decoded.error == "directory already exists"
+
+
+def test_move_dir_frames_round_trip() -> None:
+    """Directory move requests and canonical results survive the tunnel."""
+    request = HostMoveDirFrame(
+        request_id="req_move_1",
+        source_path="/srv/projects/app",
+        destination_path="/srv/private/app",
+    )
+    assert decode_host_frame(encode_host_frame(request)) == request
+
+    result = HostMoveDirResultFrame(
+        request_id="req_move_1",
+        status="ok",
+        source_path="/srv/projects/app",
+        destination_path="/srv/private/app",
+    )
+    assert decode_host_frame(encode_host_frame(result)) == result
 
 
 def test_install_harness_frame_round_trip() -> None:

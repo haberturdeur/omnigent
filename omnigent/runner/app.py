@@ -45,6 +45,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from omnigent.acp_cli_harnesses import ACP_CLI_HARNESSES
 from omnigent.debug_logging import runner_primary_session_id
+from omnigent.entities.environment_filesystem import MAX_FILE_DOWNLOAD_BYTES
 from omnigent.entities.session_resources import (
     DEFAULT_ENVIRONMENT_ID,
     SessionResourceView,
@@ -8079,6 +8080,40 @@ def create_runner_app(
                 )
             return Response(status_code=204)
 
+        if body_type == "codex_approval_mode_change":
+            harness = _session_harness_name(conversation_id)
+            if harness != "codex-native":
+                return Response(status_code=204)
+            approval_mode = body.get("approval_mode") if isinstance(body, dict) else None
+            settings_by_mode: dict[str, _JsonObject] = {
+                "default": {
+                    "approvalPolicy": "on-request",
+                    "sandbox": "workspace-write",
+                },
+                "read-only": {
+                    "approvalPolicy": "on-request",
+                    "sandbox": "read-only",
+                },
+                "full-access": {
+                    "approvalPolicy": "never",
+                    "sandbox": "danger-full-access",
+                },
+            }
+            if not isinstance(approval_mode, str) or approval_mode not in settings_by_mode:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": "invalid_input",
+                        "detail": (
+                            "Body 'approval_mode' must be default, read-only, or full-access"
+                        ),
+                    },
+                )
+            return await _handle_codex_native_settings_update(
+                conversation_id,
+                settings_by_mode[approval_mode],
+            )
+
         codex_goal_response = await codex_goal_runner.handle_event(
             conversation_id,
             body_type,
@@ -9246,6 +9281,8 @@ def create_runner_app(
         after: str | None = Query(default=None),
         before: str | None = Query(default=None),
         order: str = Query(default="desc", pattern="^(asc|desc)$"),
+        max_bytes: int | None = Query(default=None, ge=1, le=MAX_FILE_DOWNLOAD_BYTES),
+        download: bool = Query(default=False),
     ) -> JSONResponse:
         await _require_os_env(session_id)
         return await _fs_list_or_read(
@@ -9256,6 +9293,8 @@ def create_runner_app(
             after=after,
             before=before,
             order=order,
+            max_bytes=max_bytes,
+            download=download,
         )
 
     @app.put(
@@ -9832,6 +9871,8 @@ def create_runner_app(
         after: str | None = None,
         before: str | None = None,
         order: str = "desc",
+        max_bytes: int | None = None,
+        download: bool = False,
     ) -> JSONResponse:
         from omnigent.runner.environment_filesystem import (
             CallerProcessFilesystem,
@@ -9871,7 +9912,10 @@ def create_runner_app(
                 },
             )
 
-        content = await fs.read(path)
+        if download:
+            content = await fs.read(path, max_bytes=max_bytes, limit=None)
+        else:
+            content = await fs.read(path, max_bytes=max_bytes)
         content_type_guess, _ = mimetypes.guess_type(path)
         payload: dict[str, object] = {
             "object": "session.environment.filesystem.file_content",

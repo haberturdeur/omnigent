@@ -4075,6 +4075,7 @@ def server(
     _ensure_sqlite_parent_dir(db_uri)
 
     from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
+    from omnigent.stores.profile_store.sqlalchemy_store import SqlAlchemyProfileStore
     from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
     from omnigent.stores.scheduled_task_store.sqlalchemy_store import (
         SqlAlchemyScheduledTaskStore,
@@ -4088,6 +4089,7 @@ def server(
     permission_store = SqlAlchemyPermissionStore(db_uri)
     scheduled_task_store = SqlAlchemyScheduledTaskStore(db_uri)
     project_store = SqlAlchemyProjectStore(db_uri)
+    profile_store = SqlAlchemyProfileStore(db_uri)
     artifact_store = _create_artifact_store(art_loc)
 
     # Initialize the runtime with store references so workflow code
@@ -4232,6 +4234,7 @@ def server(
         permission_store=permission_store,
         scheduled_task_store=scheduled_task_store,
         project_store=project_store,
+        profile_store=profile_store,
         auth_provider=auth_provider,
         host_store=host_store,
         account_store=account_store,
@@ -5956,6 +5959,13 @@ class _SessionImportResult:
     ),
 )
 @click.option(
+    "--profile",
+    "profile_selector",
+    default=None,
+    metavar="NAME_OR_ID",
+    help="Import directly into this profile. Private profiles prompt for a passcode.",
+)
+@click.option(
     "--force",
     is_flag=True,
     help="Replace a previously imported chat from the same harness session.",
@@ -5965,6 +5975,7 @@ def import_session_command(
     source_session_id: str | None,
     recent_session_count: int | None,
     server: str | None,
+    profile_selector: str | None,
     force: bool,
 ) -> None:
     """Import chats from supported local coding harnesses.
@@ -5983,6 +5994,7 @@ def import_session_command(
       omnigent import --harness opencode --session <session-id>
       omnigent import --harness qwen --session <session-id>
       omnigent import --harness claude --last 10
+      omnigent import --harness claude --last 10 --profile Work
       omnigent import --harness claude --session <session-id> --force
     """
     import httpx
@@ -6040,6 +6052,99 @@ def import_session_command(
     if base_url is None:
         base_url = ensure_local_omnigent_server().url
     base_url = base_url.rstrip("/")
+    request_headers = _remote_headers(server_url=base_url, host_id=None)
+    profile_id: str | None = None
+    if profile_selector is not None:
+        try:
+            response = httpx.get(
+                f"{base_url}/v1/profiles",
+                headers=request_headers,
+                timeout=30.0,
+            )
+        except httpx.RequestError as exc:
+            raise click.ClickException(
+                f"Could not load profiles from the Omnigent server: {exc}"
+            ) from exc
+        if response.is_error:
+            raise click.ClickException(
+                f"Could not load profiles ({response.status_code}): {response.text}"
+            )
+        try:
+            profiles = response.json()["data"]
+            if not isinstance(profiles, list):
+                raise TypeError
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            raise click.ClickException("The server returned an invalid profile list") from exc
+
+        exact_id = [profile for profile in profiles if profile.get("id") == profile_selector]
+        exact_name = [profile for profile in profiles if profile.get("name") == profile_selector]
+        matches = exact_id or exact_name
+        if not matches:
+            folded_selector = profile_selector.casefold()
+            matches = [
+                profile
+                for profile in profiles
+                if isinstance(profile.get("name"), str)
+                and profile["name"].casefold() == folded_selector
+            ]
+        if not matches:
+            raise click.ClickException(f"Profile {profile_selector!r} was not found")
+        if len(matches) > 1:
+            raise click.ClickException(
+                f"Profile name {profile_selector!r} is ambiguous; use its profile ID"
+            )
+
+        profile = matches[0]
+        profile_id = profile.get("id")
+        if not isinstance(profile_id, str) or not profile_id:
+            raise click.ClickException("The server returned an invalid profile")
+        protection = profile.get("protection")
+        if isinstance(protection, dict) and protection.get("lock") == "passcode":
+            profile_name = profile.get("name")
+            prompt_name = profile_name if isinstance(profile_name, str) else profile_id
+            passcode = click.prompt(
+                f"Passcode for profile {prompt_name}",
+                hide_input=True,
+                type=str,
+            )
+            try:
+                unlock_response = httpx.post(
+                    f"{base_url}/v1/profiles/{profile_id}/unlock",
+                    json={"passcode": passcode},
+                    headers=request_headers,
+                    timeout=30.0,
+                )
+            except httpx.RequestError as exc:
+                raise click.ClickException(
+                    f"Could not unlock profile {prompt_name!r}: {exc}"
+                ) from exc
+            if unlock_response.is_error:
+                raise click.ClickException(
+                    f"Could not unlock profile {prompt_name!r} "
+                    f"({unlock_response.status_code}): {unlock_response.text}"
+                )
+            try:
+                unlock_token = unlock_response.json()["token"]
+                if not isinstance(unlock_token, str) or not unlock_token:
+                    raise TypeError
+            except (AttributeError, KeyError, TypeError, ValueError) as exc:
+                raise click.ClickException(
+                    "The server returned an invalid profile unlock response"
+                ) from exc
+            request_headers = {
+                **request_headers,
+                "X-Omnigent-Profile-Unlock": unlock_token,
+            }
+
+            def relock_profile() -> None:
+                with contextlib.suppress(httpx.RequestError):
+                    httpx.delete(
+                        f"{base_url}/v1/profiles/{profile_id}/unlock",
+                        headers=request_headers,
+                        timeout=30.0,
+                    )
+
+            click.get_current_context().call_on_close(relock_profile)
 
     def _import_one(target: tuple[ImportSource, str]) -> _SessionImportResult:
         # Each target carries its own harness so an "all" batch can span them.
@@ -6066,11 +6171,13 @@ def import_session_command(
                 for item in imported.items
             ],
         }
+        if profile_id is not None:
+            payload["profile_id"] = profile_id
         try:
             response = httpx.post(
                 f"{base_url}/v1/imports",
                 json=payload,
-                headers=_remote_headers(server_url=base_url, host_id=None),
+                headers=request_headers,
                 timeout=120.0,
             )
         except httpx.RequestError as exc:

@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import signal
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 RUNNER_ID_ENV_VAR = "OMNIGENT_RUNNER_ID"
@@ -36,6 +37,11 @@ RUNNER_SLICE_KEY_ENV_VAR = "OMNIGENT_RUNNER_SLICE_KEY"
 # for CLI-local runners and hosts that predate the stamp.
 RUNNER_LAUNCH_HARNESS_ENV_VAR = "OMNIGENT_RUNNER_LAUNCH_HARNESS"
 RUNNER_TUNNEL_TOKEN_HEADER = "X-Omnigent-Runner-Tunnel-Token"
+RUNNER_PROTECTION_GENERATION_ENV_VAR = "OMNIGENT_RUNNER_PROTECTION_GENERATION"
+RUNNER_ISOLATION_HOST_ID_ENV_VAR = "OMNIGENT_RUNNER_ISOLATION_HOST_ID"
+RUNNER_ISOLATION_MASKS_ENV_VAR = "OMNIGENT_RUNNER_ISOLATION_MASKS"
+RUNNER_PROTECTION_GENERATION_HEADER = "X-Omnigent-Protection-Generation"
+RUNNER_ISOLATION_HOST_ID_HEADER = "X-Omnigent-Isolation-Host-Id"
 # Sentinel ``Origin`` header that the project's own non-browser WebSocket
 # clients (runner -> server tunnel, host/daemon -> server tunnel,
 # terminal-attach) set on their handshakes so the server's CSWSH origin
@@ -74,6 +80,56 @@ RUNNER_AUTH_SECRET_ENV_VARS: frozenset[str] = frozenset(
         RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR,
     }
 )
+
+
+def encode_runner_isolation_masks(masks: Sequence[str | Path]) -> str:
+    """Encode a canonical isolation-mask snapshot for a runner environment."""
+    return json.dumps([str(mask) for mask in masks], separators=(",", ":"))
+
+
+def runner_isolation_snapshot_from_env(
+    env: Mapping[str, str],
+) -> tuple[int, str, tuple[Path, ...]] | None:
+    """Parse and validate the host-stamped runner isolation snapshot.
+
+    Both values are required together. Malformed snapshots raise instead of
+    degrading to no masks, because this environment is a security boundary.
+    """
+    raw_generation = env.get(RUNNER_PROTECTION_GENERATION_ENV_VAR)
+    raw_host_id = env.get(RUNNER_ISOLATION_HOST_ID_ENV_VAR)
+    raw_masks = env.get(RUNNER_ISOLATION_MASKS_ENV_VAR)
+    if raw_generation is None and raw_host_id is None and raw_masks is None:
+        return None
+    if raw_generation is None or raw_host_id is None or raw_masks is None:
+        raise RuntimeError("runner isolation snapshot is incomplete")
+    if not raw_host_id:
+        raise RuntimeError("runner isolation host id must not be empty")
+    if env.get(RUNNER_SLICE_KEY_ENV_VAR) != raw_host_id:
+        raise RuntimeError("runner isolation host id does not match the runner host")
+    try:
+        generation = int(raw_generation)
+    except ValueError as exc:
+        raise RuntimeError("runner protection generation must be a non-negative integer") from exc
+    if generation < 0 or str(generation) != raw_generation:
+        raise RuntimeError("runner protection generation must be a canonical non-negative integer")
+    try:
+        decoded = json.loads(raw_masks)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("runner isolation masks must be a JSON string list") from exc
+    if not isinstance(decoded, list) or not all(isinstance(item, str) for item in decoded):
+        raise RuntimeError("runner isolation masks must be a JSON string list")
+    masks: list[Path] = []
+    seen: set[Path] = set()
+    for item in decoded:
+        path = Path(item)
+        if not item or "\x00" in item or not path.is_absolute():
+            raise RuntimeError("runner isolation masks must be non-empty absolute paths")
+        normalized = path.resolve(strict=False)
+        if normalized in seen:
+            raise RuntimeError("runner isolation masks must not contain duplicates")
+        seen.add(normalized)
+        masks.append(normalized)
+    return generation, raw_host_id, tuple(masks)
 
 
 def strip_runner_auth_secrets(env: Mapping[str, str]) -> dict[str, str]:

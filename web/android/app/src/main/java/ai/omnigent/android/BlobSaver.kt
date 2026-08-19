@@ -10,7 +10,11 @@ import android.provider.MediaStore
 import android.util.Base64
 import android.widget.Toast
 import androidx.annotation.RequiresApi
+import org.json.JSONObject
 import java.io.File
+import java.io.InputStream
+import java.net.HttpURLConnection
+import java.net.URL
 import java.util.concurrent.Executors
 
 /**
@@ -59,11 +63,50 @@ class BlobSaver(
         }
     }
 
+    /** Stream a same-origin authenticated response directly into Downloads. */
+    fun download(
+        url: String,
+        headers: Map<String, String>,
+        mimeType: String,
+        suggestedName: String,
+    ) {
+        io.execute {
+            val name = safeFileName(suggestedName)
+            val saved =
+                runCatching {
+                    val connection =
+                        openNativeDownloadConnection(url, headers) ?: return@runCatching false
+                    try {
+                        connection.inputStream.use { input ->
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                saveViaMediaStore(name, mimeType, input)
+                            } else {
+                                saveToAppDownloads(name, input)
+                            }
+                        }
+                    } finally {
+                        connection.disconnect()
+                    }
+                }.getOrDefault(false)
+            main.post {
+                val message = if (saved) "Saved $name to Downloads" else "Couldn't save $name"
+                Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
     @RequiresApi(Build.VERSION_CODES.Q)
     private fun saveViaMediaStore(
         name: String,
         mimeType: String,
         bytes: ByteArray,
+    ): Boolean = saveViaMediaStore(name, mimeType, bytes.inputStream())
+
+    @RequiresApi(Build.VERSION_CODES.Q)
+    private fun saveViaMediaStore(
+        name: String,
+        mimeType: String,
+        input: InputStream,
     ): Boolean =
         runCatching {
             val resolver = context.contentResolver
@@ -76,7 +119,7 @@ class BlobSaver(
             val uri =
                 resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
                     ?: return false
-            resolver.openOutputStream(uri)?.use { it.write(bytes) } ?: return false
+            resolver.openOutputStream(uri)?.use { output -> input.copyTo(output) } ?: return false
             values.clear()
             values.put(MediaStore.Downloads.IS_PENDING, 0)
             resolver.update(uri, values, null, null)
@@ -86,12 +129,17 @@ class BlobSaver(
     private fun saveToAppDownloads(
         name: String,
         bytes: ByteArray,
+    ): Boolean = saveToAppDownloads(name, bytes.inputStream())
+
+    private fun saveToAppDownloads(
+        name: String,
+        input: InputStream,
     ): Boolean =
         runCatching {
             val dir =
                 context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
                     ?: context.filesDir
-            File(dir, name).outputStream().use { it.write(bytes) }
+            File(dir, name).outputStream().use { output -> input.copyTo(output) }
             true
         }.getOrDefault(false)
 
@@ -111,4 +159,40 @@ class BlobSaver(
             cleaned
         }
     }
+}
+
+internal fun openNativeDownloadConnection(
+    url: String,
+    headers: Map<String, String>,
+    connectionFactory: (String) -> HttpURLConnection = {
+        URL(it).openConnection() as HttpURLConnection
+    },
+): HttpURLConnection? {
+    fun open(requestHeaders: Map<String, String>): HttpURLConnection =
+        connectionFactory(url).apply {
+            connectTimeout = 15_000
+            readTimeout = 60_000
+            instanceFollowRedirects = false
+            requestHeaders.forEach { (name, value) -> setRequestProperty(name, value) }
+        }
+
+    val first = open(headers)
+    if (first.responseCode in 200..299) return first
+    val sliceHeader = "X-Databricks-Omnigent-Slice-Key"
+    val shouldRetry = headers.containsKey(sliceHeader) && first.isWrongReplica()
+    first.disconnect()
+    if (!shouldRetry) return null
+
+    val retry = open(headers - sliceHeader)
+    if (retry.responseCode in 200..299) return retry
+    retry.disconnect()
+    return null
+}
+
+private fun HttpURLConnection.isWrongReplica(): Boolean {
+    if (responseCode != 400) return false
+    val body = errorStream?.bufferedReader()?.use { it.readText() } ?: return false
+    return runCatching {
+        JSONObject(body).optJSONObject("error")?.optString("code") == "wrong_replica"
+    }.getOrDefault(false)
 }

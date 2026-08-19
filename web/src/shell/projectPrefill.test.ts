@@ -41,6 +41,14 @@ function runToDone(stepInputs: ReturnType<typeof inputs>) {
 }
 
 describe("projectPrefill config seeding", () => {
+  it("runs the machine for a plain composer when profile defaults exist", () => {
+    expect(initialPrefillState("", true)).toEqual({
+      project: "",
+      phase: "location",
+      agentSeeded: false,
+    });
+  });
+
   it("waits while the config is still loading", () => {
     const step = projectPrefillStep(initialPrefillState("Alpha"), inputs({ config: undefined }));
     expect(step).toBeNull();

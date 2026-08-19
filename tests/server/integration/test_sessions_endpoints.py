@@ -9121,6 +9121,84 @@ async def test_patch_permission_mode_rejects_non_claude_session(
     assert "permission_mode is only supported" in resp.text
 
 
+async def test_patch_codex_approval_mode_applies_live_then_persists_resume_args(
+    client: httpx.AsyncClient,
+) -> None:
+    """A runtime approval preset reaches Codex before its resume args change."""
+    from omnigent.runtime import set_runner_client
+
+    captured: list[_ForwardedEffort] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content) if request.content else None
+        captured.append(_ForwardedEffort(url=str(request.url), body=body))
+        return httpx.Response(204)
+
+    fake_runner = httpx.AsyncClient(
+        transport=httpx.MockTransport(_handler),
+        base_url="http://runner",
+    )
+    set_runner_client(fake_runner)
+    try:
+        agent = await create_test_agent(client)
+        session = await _create_session(
+            client,
+            agent["id"],
+            labels={
+                "omnigent.ui": "terminal",
+                "omnigent.wrapper": "codex-native-ui",
+                "omnigent.codex_native.bypass_sandbox": "1",
+            },
+            terminal_launch_args=["--dangerously-bypass-approvals-and-sandbox"],
+        )
+        captured.clear()
+
+        resp = await client.patch(
+            f"/v1/sessions/{session['id']}",
+            json={"codex_approval_mode": "read-only"},
+        )
+    finally:
+        await fake_runner.aclose()
+        set_runner_client(None)
+
+    assert resp.status_code == 200, resp.text
+    forwards = [f for f in captured if f.url.endswith(f"/v1/sessions/{session['id']}/events")]
+    assert [forward.body for forward in forwards] == [
+        {"type": "codex_approval_mode_change", "approval_mode": "read-only"}
+    ]
+    assert resp.json()["terminal_launch_args"] == [
+        "--sandbox",
+        "read-only",
+        "--ask-for-approval",
+        "on-request",
+    ]
+    assert "omnigent.codex_native.bypass_sandbox" not in resp.json()["labels"]
+
+
+async def test_patch_codex_approval_mode_does_not_persist_when_runner_is_unavailable(
+    client: httpx.AsyncClient,
+) -> None:
+    """A failed live switch leaves the session's resume preset unchanged."""
+    from omnigent.runtime import set_runner_client
+
+    set_runner_client(None)
+    agent = await create_test_agent(client)
+    session = await _create_session(
+        client,
+        agent["id"],
+        labels={"omnigent.ui": "terminal", "omnigent.wrapper": "codex-native-ui"},
+    )
+
+    resp = await client.patch(
+        f"/v1/sessions/{session['id']}",
+        json={"codex_approval_mode": "full-access"},
+    )
+    snapshot = (await client.get(f"/v1/sessions/{session['id']}")).json()
+
+    assert resp.status_code == 503, resp.text
+    assert snapshot["terminal_launch_args"] is None
+
+
 @pytest.mark.parametrize(
     "native_session,patch_effort,expected_persisted,expected_event_effort",
     [

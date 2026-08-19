@@ -39,7 +39,7 @@ import re
 from pathlib import Path
 from typing import TypeAlias, cast
 
-from omnigent.entities.environment_filesystem import InvalidPath
+from omnigent.entities.environment_filesystem import MAX_FILE_DOWNLOAD_BYTES, InvalidPath
 from omnigent.entities.pagination import paginate_in_memory
 from omnigent.inner._cwd_scan import _DEFAULT_DEPRIORITIZED_DIRS
 from omnigent.inner.os_env import _DEFAULT_READ_LIMIT
@@ -129,6 +129,8 @@ class WorkspaceReader:
         after: str | None = None,
         before: str | None = None,
         order: str = "desc",
+        max_bytes: int | None = None,
+        download: bool = False,
     ) -> _WorkspacePayload:
         """List a directory or read a file, mirroring ``_fs_list_or_read``.
 
@@ -143,7 +145,14 @@ class WorkspaceReader:
         resolved = self._resolve(path)
         if resolved.is_dir():
             return self._list_dir(path, resolved, limit, after, before, order)
-        return self._read_file(path, resolved)
+        byte_cap = _MAX_READ_BYTES if max_bytes is None else max_bytes
+        byte_cap = min(max(1, byte_cap), MAX_FILE_DOWNLOAD_BYTES)
+        return self._read_file(
+            path,
+            resolved,
+            max_bytes=byte_cap,
+            limit=None if download else _DEFAULT_READ_LIMIT,
+        )
 
     def _list_dir(
         self,
@@ -220,6 +229,7 @@ class WorkspaceReader:
         rel: str,
         resolved: Path,
         *,
+        max_bytes: int | None = None,
         limit: int | None = _DEFAULT_READ_LIMIT,
     ) -> _WorkspacePayload:
         """Build the file-content payload for a resolved file.
@@ -233,29 +243,31 @@ class WorkspaceReader:
         bounded read) rather than slurping the whole file, so opening a
         multi-GB file in the viewer can't OOM the host process.
         """
+        byte_cap = _MAX_READ_BYTES if max_bytes is None else max_bytes
         try:
             with resolved.open("rb") as fh:
                 # One extra byte lets us detect (and flag) truncation
                 # without loading the rest of a large file into memory.
-                capped = fh.read(_MAX_READ_BYTES + 1)
+                capped = fh.read(byte_cap + 1)
         except OSError as exc:
             raise WorkspaceReaderError(404, "not_found", f"Path {rel!r} not found") from exc
 
-        return self._file_content_payload(rel, capped, limit=limit)
+        return self._file_content_payload(rel, capped, max_bytes=byte_cap, limit=limit)
 
     def _file_content_payload(
         self,
         rel: str,
         raw: bytes,
         *,
+        max_bytes: int = _MAX_READ_BYTES,
         limit: int | None,
     ) -> _WorkspacePayload:
         """Assemble the file-content dict from raw bytes."""
         content_type_guess, _ = mimetypes.guess_type(rel)
         truncated = False
         capped = raw
-        if len(capped) > _MAX_READ_BYTES:
-            capped = capped[:_MAX_READ_BYTES]
+        if len(capped) > max_bytes:
+            capped = capped[:max_bytes]
             truncated = True
 
         text: str | None = None

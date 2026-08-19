@@ -15,6 +15,7 @@ import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { copyText } from "@/lib/clipboard";
 import { isDatabricksWorkspace, resolveWebSocketUrl } from "@/lib/host";
+import { getActiveProfileUnlockToken } from "@/lib/profileUnlock";
 import { subscribeCodeFont } from "@/lib/codeFontPreferences";
 import { resolveInitialAttachUrl, watchDirectUpgrade, withAttachParams } from "@/lib/terminals";
 import {
@@ -584,6 +585,7 @@ export function TerminalView({
           !readOnly && activeRef.current,
           notifyClipboardRequest,
           focusOnConnectRef.current,
+          url === relayUrl ? getActiveProfileUnlockToken() : null,
         );
         sessionRef.current = terminalSession;
         // Relay-connected with a direct URL on offer: negotiate the

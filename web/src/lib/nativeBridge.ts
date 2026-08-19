@@ -52,6 +52,8 @@ export interface BadgeActivation {
 interface NativeShellApi {
   /** Discriminator so feature detection is unambiguous. */
   kind: "electron" | "ios" | "android";
+  /** Full configured server URL, including a reverse-proxy mount path. */
+  serverBaseUrl?: string;
   /**
    * Paint the dock/taskbar badge; 0 clears it. `activation` is consumed only by
    * the Android shell, which renders the badge as a tray notification and needs
@@ -63,6 +65,12 @@ interface NativeShellApi {
   setColorScheme?: (scheme: "light" | "dark" | "system") => void;
   /** Fire an OS notification; resolves true when it was shown. */
   notify: (params: NativeNotifyParams) => Promise<boolean>;
+  /** Withdraw native notifications for a session once it is being viewed. */
+  dismissSessionNotifications?: (sessionId: string) => void;
+  /** Open native server, notification, and keyboard controls. */
+  openServerSettings?: () => void;
+  /** Stream an authenticated same-origin download in the Android shell. */
+  downloadFile?: (params: NativeDownloadParams) => void;
   // Optional: a shell older than this SPA may lack notification-click routing,
   // in which case clicking a native toast only focuses the app (the prior
   // behavior) instead of also navigating.
@@ -114,6 +122,10 @@ interface NativeShellApi {
    * hardcoding them. Absent on older shells. Returns an unsubscribe.
    */
   onNativeInsets?: (callback: (insets: NativeInsets) => void) => () => void;
+  /** Android-only biometric storage for a private profile passcode. */
+  privateProfilePasscode?: (profileId: string, passcode?: string) => Promise<string>;
+  /** Delete an Android biometric credential after protection is disabled. */
+  removePrivateProfileCredential?: (profileId: string) => void;
 }
 
 export type ThemeSource = "light" | "dark" | "system";
@@ -124,6 +136,13 @@ export interface NativeInsets {
   topBar: number;
   /** Chat/Terminal bar capsule height + its bottom padding. */
   bottomBar: number;
+}
+
+export interface NativeDownloadParams {
+  url: string;
+  name: string;
+  mimeType?: string;
+  headers?: Record<string, string>;
 }
 
 export type NativeViewMode = "chat" | "terminal";
@@ -394,6 +413,44 @@ export function isElectronShell(): boolean {
   return electronApi() !== undefined;
 }
 
+/** Ask Android to authenticate and return a server-issued profile unlock token. */
+export async function privateProfilePasscode(
+  profileId: string,
+  passcode?: string,
+): Promise<string | null> {
+  const method = nativeApi()?.privateProfilePasscode;
+  if (!method) return null;
+  try {
+    return await method(profileId, passcode);
+  } catch {
+    return null;
+  }
+}
+
+export function hasPrivateProfileBiometrics(): boolean {
+  return typeof nativeApi()?.privateProfilePasscode === "function";
+}
+
+/** Hand a same-origin response download to a native shell when supported. */
+export function downloadNativeFile(params: NativeDownloadParams): boolean {
+  const method = nativeApi()?.downloadFile;
+  if (!method) return false;
+  try {
+    method(params);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function removePrivateProfileCredential(profileId: string): void {
+  try {
+    nativeApi()?.removePrivateProfileCredential?.(profileId);
+  } catch (err) {
+    console.warn("[nativeBridge] native credential removal failed:", err);
+  }
+}
+
 /** Desktop auto-update bridge, or undefined outside Electron / older shells. */
 export function updateBridge(): ElectronUpdateBridge | undefined {
   return electronApi()?.updates;
@@ -435,6 +492,19 @@ export function isIOSShell(): boolean {
  */
 export function isAndroidShell(): boolean {
   return nativeApi()?.kind === "android";
+}
+
+/** Full configured Android server URL, preserving any path mount. */
+export function getNativeServerBaseUrl(): string | null {
+  const native = nativeApi();
+  if (
+    native?.kind !== "android" ||
+    typeof native.serverBaseUrl !== "string" ||
+    !native.serverBaseUrl.trim()
+  ) {
+    return null;
+  }
+  return native.serverBaseUrl;
 }
 
 /**
@@ -486,6 +556,28 @@ export async function nativeNotify({
     // broken bridge is visible instead of silently dropping notifications.
     console.warn("[nativeBridge] native notify failed:", err);
     return false;
+  }
+}
+
+/** Withdraw Android notifications for a session that is now open in the app. */
+export function dismissNativeSessionNotifications(sessionId: string): void {
+  const native = nativeApi();
+  if (!native?.dismissSessionNotifications) return;
+  try {
+    native.dismissSessionNotifications(sessionId);
+  } catch (err) {
+    console.warn("[nativeBridge] native notification dismissal failed:", err);
+  }
+}
+
+/** Open the Android shell's server and app settings menu. */
+export function openNativeServerSettings(): void {
+  const native = nativeApi();
+  if (!native?.openServerSettings) return;
+  try {
+    native.openServerSettings();
+  } catch (err) {
+    console.warn("[nativeBridge] native server settings failed:", err);
   }
 }
 

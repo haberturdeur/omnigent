@@ -296,6 +296,9 @@ class HostConnection:
     pending_create_dirs: dict[str, asyncio.Future[dict[str, Any]]] = field(
         default_factory=dict,
     )
+    pending_move_dirs: dict[str, asyncio.Future[dict[str, Any]]] = field(
+        default_factory=dict,
+    )
     pending_installs: dict[str, asyncio.Future[dict[str, Any]]] = field(
         default_factory=dict,
     )

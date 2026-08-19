@@ -9,13 +9,24 @@ import logging
 import os
 import subprocess
 import sys
+from pathlib import Path
 
+import pytest
+
+from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
 from omnigent.inner.sandbox import (
     SandboxPolicy,
     create_exec_launcher,
+    resolve_sandbox,
     run_launcher,
 )
-from omnigent.runner.identity import RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR
+from omnigent.runner.identity import (
+    RUNNER_ISOLATION_HOST_ID_ENV_VAR,
+    RUNNER_ISOLATION_MASKS_ENV_VAR,
+    RUNNER_PROTECTION_GENERATION_ENV_VAR,
+    RUNNER_SLICE_KEY_ENV_VAR,
+    RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR,
+)
 
 
 def _noop_policy() -> SandboxPolicy:
@@ -43,6 +54,143 @@ def _noop_policy_arg() -> str:
         "utf-8"
     )
     return base64.urlsafe_b64encode(raw).decode("ascii")
+
+
+def test_private_roots_upgrade_full_access_to_bwrap(tmp_path: Path, monkeypatch) -> None:
+    """A full-access session keeps working while another profile stays masked."""
+    from omnigent.inner import sandbox as sandbox_module
+
+    private = tmp_path / "private"
+    public = tmp_path / "public"
+    private.mkdir()
+    public.mkdir()
+    monkeypatch.setenv(
+        "OMNIGENT_PROFILE_PROTECTION_PATH", str(tmp_path / "profile-protection.json")
+    )
+    from omnigent.server.profile_protection import configure_profile_protection
+
+    configure_profile_protection(
+        "private-profile", user_id="owner", passcode="secret", protected_roots=[str(private)]
+    )
+    spec = OSEnvSpec(type="caller_process", cwd=str(public), sandbox=OSEnvSandboxSpec(type="none"))
+
+    class FakeBackend:
+        def resolve(self, resolved_spec, cwd):
+            assert resolved_spec.sandbox.type == "linux_bwrap"
+            assert resolved_spec.sandbox.write_paths == ["/"]
+            return SandboxPolicy(
+                backend_type="linux_bwrap",
+                active=True,
+                read_roots=None,
+                write_roots=[Path("/")],
+                write_files=[],
+                allow_network=True,
+            )
+
+    monkeypatch.setattr(sandbox_module, "_get_backend", lambda _type: FakeBackend())
+
+    policy = resolve_sandbox(spec, public)
+
+    assert policy.backend_type == "linux_bwrap"
+    assert policy.write_roots == [Path("/")]
+    assert private.resolve() in (policy.mask_paths or [])
+    assert spec.sandbox.type == "none"
+
+
+def test_bwrap_policy_masks_only_other_private_profiles(tmp_path: Path, monkeypatch) -> None:
+    """A private workspace keeps its roots and loses every peer profile's roots."""
+    from omnigent.inner import sandbox as sandbox_module
+    from omnigent.server.profile_protection import configure_profile_protection
+
+    own = tmp_path / "own"
+    peer = tmp_path / "peer"
+    own.mkdir()
+    peer.mkdir()
+    monkeypatch.setenv(
+        "OMNIGENT_PROFILE_PROTECTION_PATH", str(tmp_path / "profile-protection.json")
+    )
+    configure_profile_protection(
+        "own-profile", user_id="owner", passcode="one", protected_roots=[str(own)]
+    )
+    configure_profile_protection(
+        "peer-profile", user_id="owner", passcode="two", protected_roots=[str(peer)]
+    )
+
+    class FakeBackend:
+        def resolve(self, spec, cwd):
+            return SandboxPolicy(
+                backend_type="linux_bwrap",
+                active=True,
+                read_roots=None,
+                write_roots=[cwd],
+                write_files=[],
+                allow_network=True,
+                mask_paths=[cwd / ".env"],
+            )
+
+    monkeypatch.setattr(sandbox_module, "_get_backend", lambda _type: FakeBackend())
+    spec = OSEnvSpec(
+        type="caller_process",
+        cwd=str(own),
+        sandbox=OSEnvSandboxSpec(type="linux_bwrap"),
+    )
+
+    policy = resolve_sandbox(spec, own)
+
+    assert peer.resolve() in (policy.mask_paths or [])
+    assert own.resolve() not in (policy.mask_paths or [])
+    assert own / ".env" in (policy.mask_paths or [])
+
+
+def test_runner_snapshot_overrides_missing_local_registry(tmp_path: Path, monkeypatch) -> None:
+    """Remote runners consume host-stamped masks, not a server-local file."""
+    from omnigent.inner import sandbox as sandbox_module
+
+    workspace = tmp_path / "workspace"
+    masked = tmp_path / "private"
+    workspace.mkdir()
+    monkeypatch.setenv(
+        RUNNER_PROTECTION_GENERATION_ENV_VAR,
+        "4",
+    )
+    monkeypatch.setenv(RUNNER_ISOLATION_HOST_ID_ENV_VAR, "host-a")
+    monkeypatch.setenv(RUNNER_SLICE_KEY_ENV_VAR, "host-a")
+    monkeypatch.setenv(RUNNER_ISOLATION_MASKS_ENV_VAR, f'["{masked}"]')
+    monkeypatch.setenv("OMNIGENT_PROFILE_PROTECTION_PATH", str(tmp_path / "does-not-exist.json"))
+
+    class FakeBackend:
+        def resolve(self, spec, cwd):
+            return SandboxPolicy(
+                backend_type="linux_bwrap",
+                active=True,
+                read_roots=None,
+                write_roots=[cwd],
+                write_files=[],
+                allow_network=True,
+            )
+
+    monkeypatch.setattr(sandbox_module, "_get_backend", lambda _type: FakeBackend())
+    policy = resolve_sandbox(
+        OSEnvSpec(
+            type="caller_process",
+            cwd=str(workspace),
+            sandbox=OSEnvSandboxSpec(type="none"),
+        ),
+        workspace,
+    )
+
+    assert policy.mask_paths == [masked.resolve()]
+
+
+def test_malformed_runner_snapshot_prevents_sandbox_resolution(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Invalid runner metadata cannot degrade to an unmasked sandbox."""
+    monkeypatch.setenv(RUNNER_PROTECTION_GENERATION_ENV_VAR, "3")
+    monkeypatch.delenv(RUNNER_ISOLATION_MASKS_ENV_VAR, raising=False)
+
+    with pytest.raises(RuntimeError, match="snapshot is incomplete"):
+        resolve_sandbox(OSEnvSpec(type="caller_process"), tmp_path)
 
 
 def test_run_launcher_emits_logger_checkpoints(caplog) -> None:

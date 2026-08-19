@@ -674,6 +674,46 @@ describe("ApprovalCard — AskUserQuestion form (parsed from content_preview)", 
     });
   });
 
+  it("submits a selected option together with optional additional context", () => {
+    const submitSpy = vi.fn().mockResolvedValue(undefined);
+    useChatStore.setState({ submitApproval: submitSpy } as Partial<
+      ReturnType<typeof useChatStore.getState>
+    >);
+
+    render(
+      <ApprovalCard
+        elicitationId="elic_context"
+        message="Codex needs input"
+        phase="codex_request_user_input"
+        policyName="codex_native_request_user_input"
+        contentPreview=""
+        requestedSchema={{}}
+        status="pending"
+        response={null}
+        askUserQuestion={{
+          questions: [
+            {
+              id: "framework",
+              question: "Which framework?",
+              options: [{ label: "React" }, { label: "Vue" }],
+              multiSelect: false,
+            },
+          ],
+        }}
+      />,
+    );
+
+    fireEvent.click(screen.getByLabelText("React"));
+    fireEvent.change(screen.getByLabelText("Additional context"), {
+      target: { value: "Use the existing component library." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /submit/i }));
+
+    expect(submitSpy).toHaveBeenCalledWith("elic_context", "accept", {
+      framework: "React\n\nAdditional context: Use the existing component library.",
+    });
+  });
+
   it("submits structured question answers keyed by id when present", () => {
     // Codex requestUserInput questions carry stable ids that the
     // app-server expects in the result. The display text is only UI

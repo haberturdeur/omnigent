@@ -17,6 +17,7 @@
 // access-checks every watched id against the connection's user.
 
 import { getOmnigentHostConfig, resolveWebSocketUrl } from "@/lib/host";
+import { getActiveProfileUnlockToken, subscribeProfileUnlock } from "@/lib/profileUnlock";
 import { modalHostId } from "@/lib/sessionHost";
 import type { SessionListWireItem } from "@/lib/sessionListCache";
 
@@ -105,17 +106,21 @@ class SessionUpdatesSocket {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private watchdogTimer: ReturnType<typeof setTimeout> | null = null;
   private started = false;
+  private unsubscribeProfileUnlock: (() => void) | null = null;
 
   /** Open the connection (idempotent). */
   start(): void {
     if (this.started) return;
     this.started = true;
+    this.unsubscribeProfileUnlock = subscribeProfileUnlock(() => this.sendWatch());
     this.connect();
   }
 
   /** Close the connection and stop reconnecting. */
   stop(): void {
     this.started = false;
+    this.unsubscribeProfileUnlock?.();
+    this.unsubscribeProfileUnlock = null;
     this.clearWatchdog();
     if (this.reconnectTimer !== null) {
       clearTimeout(this.reconnectTimer);
@@ -266,7 +271,13 @@ class SessionUpdatesSocket {
 
   private sendWatch(): void {
     if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ type: "watch", session_ids: this.watched }));
+      this.ws.send(
+        JSON.stringify({
+          type: "watch",
+          session_ids: this.watched,
+          profile_unlock: getActiveProfileUnlockToken(),
+        }),
+      );
     }
   }
 

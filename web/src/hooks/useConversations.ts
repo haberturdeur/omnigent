@@ -43,11 +43,16 @@ import { revokePermission } from "@/lib/permissionsApi";
 import { conversationDisplayLabel, setLegacyPinnedConversationId } from "@/shell/sidebarNav";
 import { stopSession } from "@/lib/sessionsApi";
 import { setSessionHost } from "@/lib/sessionHost";
+import { addActiveProfileParam } from "@/lib/profilesApi";
+import { getProfileUnlockToken, setProfileUnlockToken } from "@/lib/profileUnlock";
 import {
+  addProjectRootToPrivateProfile as apiAddProjectRootToPrivateProfile,
   createProject as apiCreateProject,
   deleteProject as apiDeleteProject,
   getProject as apiGetProject,
   listProjects as apiListProjects,
+  moveProject as apiMoveProject,
+  moveProjectFolder as apiMoveProjectFolder,
   type ProjectConfig,
   renameProject as apiRenameProject,
   updateProjectConfig as apiUpdateProjectConfig,
@@ -226,6 +231,7 @@ export interface Conversation {
    * id OR the label during the dual-read transition.
    */
   project_id?: string | null;
+  profile_id?: string | null;
 }
 
 export interface ConversationsPage {
@@ -435,6 +441,7 @@ async function fetchConversationsPage({
   // query key (which drops `project`) and the cache-membership check. This
   // list never requests the server's "unfiled" (`project=`) slice.
   if (project) params.set("project", project);
+  addActiveProfileParam(params);
   // Bound search fetches with a client-side deadline (see
   // SEARCH_FETCH_TIMEOUT_MS): a search whose server-side index is missing can
   // hang, and the palette shows "Searching…" for the whole in-flight window.
@@ -1282,6 +1289,7 @@ export async function fetchPinnedConversations(): Promise<PinnedConversationsRes
     limit: "100",
     pinned: "true",
   });
+  addActiveProfileParam(params);
   const res = await authenticatedFetch(`/v1/sessions?${params.toString()}`);
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   const rows = withoutDeletingSessions((await res.json()) as ConversationsPage).data;
@@ -1532,7 +1540,10 @@ export function useProjects() {
   return useQuery<ProjectSummary[]>({
     queryKey: ["projects"],
     queryFn: async () => {
-      const res = await authenticatedFetch("/v1/sessions/projects");
+      const params = new URLSearchParams();
+      addActiveProfileParam(params);
+      const suffix = params.size ? `?${params.toString()}` : "";
+      const res = await authenticatedFetch(`/v1/sessions/projects${suffix}`);
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
       return (await res.json()) as ProjectSummary[];
     },
@@ -1565,6 +1576,7 @@ export async function fetchAllArchivedProjectNames(): Promise<string[]> {
       include_archived: "true",
     });
     if (after) params.set("after", after);
+    addActiveProfileParam(params);
     // Sequential by necessity: each page's request needs the previous page's
     // cursor (`after`), so these awaits can't be parallelized.
     // eslint-disable-next-line no-await-in-loop
@@ -1833,6 +1845,7 @@ async function fetchAllProjectSessionIds(project: string): Promise<string[]> {
       project,
     });
     if (after) params.set("after", after);
+    addActiveProfileParam(params);
     // Sequential by necessity: each page's request needs the previous page's
     // cursor (`after`), so these awaits can't be parallelized.
     // eslint-disable-next-line no-await-in-loop
@@ -1862,6 +1875,7 @@ export async function fetchProjectSessionIds(project: string, limit = 2): Promis
     include_archived: "true",
     project,
   });
+  addActiveProfileParam(params);
   const res = await authenticatedFetch(`/v1/sessions?${params.toString()}`);
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   const page = (await res.json()) as ConversationsPage;
@@ -1881,6 +1895,7 @@ async function fetchProjectSessionsPage(
     project,
   });
   if (after) params.set("after", after);
+  addActiveProfileParam(params);
   const res = await authenticatedFetch(`/v1/sessions?${params.toString()}`);
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return withoutDeletingSessions((await res.json()) as ConversationsPage);
@@ -1997,12 +2012,8 @@ export function useCreateProject() {
  * `PATCH /v1/projects/{id}`; a label-only folder (`id === null`) is promoted on
  * demand — a row created under the new name.
  *
- * Either way, the folder's members are swept via the dual-read
- * `?project=<oldName>` and re-filed onto the target `project_id` with their
- * legacy `omni_project` label cleared. That keeps the rename coherent across
- * both membership representations during the transition: a first-class row's
- * members that were still matched by the legacy label don't get stranded in an
- * `oldName` folder, and nothing ends up matching two folders at once.
+ * The server adopts label-only members and clears their legacy labels in the
+ * same project PATCH, so rename cost is independent of member count.
  */
 export function useRenameProject() {
   const queryClient = useQueryClient();
@@ -2016,46 +2027,132 @@ export function useRenameProject() {
       oldName: string;
       newName: string;
     }) => {
-      // The target project id: rename the existing row (first-class), or
-      // create one on demand (label-only folder being promoted).
-      let projectId: string;
       if (id !== null) {
-        await apiRenameProject(id, newName);
-        projectId = id;
+        return (await apiRenameProject(id, newName, oldName)).id;
       } else {
-        projectId = (await apiCreateProject(newName)).id;
+        const projectId = (await apiCreateProject(newName)).id;
+        await apiRenameProject(projectId, newName, oldName);
+        return projectId;
       }
-      // Reconcile the folder's members either way. During the dual-read
-      // transition a member can still sit in the oldName folder via the legacy
-      // omni_project label; re-file each onto project_id and clear that label so
-      // the rename is coherent for both membership representations and nothing
-      // is left behind in an oldName folder.
-      const memberIds = await fetchAllProjectSessionIds(oldName);
-      await Promise.all(
-        memberIds.map(async (sid) => {
-          const res = await authenticatedFetch(`/v1/sessions/${encodeURIComponent(sid)}`, {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              project_id: projectId,
-              labels: { [PROJECT_LABEL_KEY]: "" },
-            }),
-          });
-          // Surface a failed re-file: a resolved-but-4xx/5xx response would
-          // otherwise report success while leaving members behind.
-          if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-        }),
-      );
-      // Return the resolved id so a caller promoting a label-only folder can
-      // target the just-created row for a follow-up write instead of passing
-      // the stale `null` and re-creating it (which 409s on the duplicate name).
-      return projectId;
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["conversations"] });
       void queryClient.invalidateQueries({ queryKey: ["projects"] });
       void queryClient.invalidateQueries({ queryKey: ["project-sessions"] });
       void queryClient.invalidateQueries({ queryKey: ARCHIVED_PROJECT_NAMES_KEY });
+    },
+  });
+}
+
+/** Move a first-class project and its sessions into another profile. */
+export function useMoveProjectToProfile() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      id,
+      name,
+      profileId,
+    }: {
+      id: string | null;
+      name: string;
+      profileId: string;
+    }) => {
+      const projectId = id ?? (await apiCreateProject(name)).id;
+      return apiMoveProject(projectId, profileId);
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["conversations"] });
+      void queryClient.invalidateQueries({ queryKey: ["projects"] });
+      void queryClient.invalidateQueries({ queryKey: ["project-sessions"] });
+      void queryClient.invalidateQueries({ queryKey: ["project-config"] });
+    },
+  });
+}
+
+/** Move one standalone session (and its sub-agent tree) into another profile. */
+export function useMoveSessionToProfile() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ id, profileId }: { id: string; profileId: string }) => {
+      const destinationToken = getProfileUnlockToken(profileId);
+      const response = await authenticatedFetch(`/v1/sessions/${encodeURIComponent(id)}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          ...(destinationToken
+            ? { "X-Omnigent-Destination-Profile-Unlock": destinationToken }
+            : {}),
+        },
+        body: JSON.stringify({ profile_id: profileId }),
+      });
+      if (!response.ok) {
+        let detail = `${response.status} ${response.statusText}`;
+        try {
+          const body = (await response.json()) as { error?: { message?: string } };
+          detail = body.error?.message ?? detail;
+        } catch {
+          // Keep the status fallback for non-JSON responses.
+        }
+        throw new Error(detail);
+      }
+      return (await response.json()) as Conversation;
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["conversations"] });
+      void queryClient.invalidateQueries({ queryKey: ["project-sessions"] });
+      void queryClient.invalidateQueries({ queryKey: ["child-sessions"] });
+    },
+  });
+}
+
+/** Move a project's configured folder before moving it into another profile. */
+export function useMoveProjectFolderToProfile() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      id,
+      name,
+      profileId,
+    }: {
+      id: string | null;
+      name: string;
+      profileId: string;
+    }) => {
+      const projectId = id ?? (await apiCreateProject(name)).id;
+      return apiMoveProjectFolder(projectId, profileId);
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["conversations"] });
+      void queryClient.invalidateQueries({ queryKey: ["projects"] });
+      void queryClient.invalidateQueries({ queryKey: ["project-sessions"] });
+      void queryClient.invalidateQueries({ queryKey: ["project-config"] });
+    },
+  });
+}
+
+/** Protect a project's current folder as a destination-profile root, then move it. */
+export function useAddProjectRootToPrivateProfile() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      id,
+      name,
+      profileId,
+    }: {
+      id: string | null;
+      name: string;
+      profileId: string;
+    }) => {
+      const projectId = id ?? (await apiCreateProject(name)).id;
+      return apiAddProjectRootToPrivateProfile(projectId, profileId);
+    },
+    onSuccess: (_project, variables) => {
+      setProfileUnlockToken(variables.profileId, null);
+      void queryClient.invalidateQueries({ queryKey: ["conversations"] });
+      void queryClient.invalidateQueries({ queryKey: ["projects"] });
+      void queryClient.invalidateQueries({ queryKey: ["project-sessions"] });
+      void queryClient.invalidateQueries({ queryKey: ["project-config"] });
+      void queryClient.invalidateQueries({ queryKey: ["profiles"] });
     },
   });
 }

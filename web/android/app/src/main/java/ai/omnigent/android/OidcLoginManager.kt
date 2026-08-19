@@ -7,6 +7,7 @@ import android.os.Handler
 import android.os.Looper
 import org.json.JSONObject
 import java.net.HttpURLConnection
+import java.net.URI
 import java.net.URL
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
@@ -49,7 +50,7 @@ class OidcLoginManager {
     private val flowGeneration = AtomicInteger(0)
 
     /**
-     * Begin a login against [origin] (the pinned server). Opens the browser and
+     * Begin a login against [serverBaseUrl] (the pinned server). Opens the browser and
      * polls in the background; [onSession] is invoked on the main thread with the
      * session JWT once the browser flow completes.
      *
@@ -59,7 +60,7 @@ class OidcLoginManager {
      */
     fun start(
         activity: Activity,
-        origin: String,
+        serverBaseUrl: String,
         onSession: (String) -> Unit,
     ): Boolean {
         if (!inFlight.compareAndSet(false, true)) return false
@@ -69,7 +70,7 @@ class OidcLoginManager {
             io.submit {
                 var token: String? = null
                 try {
-                    val ticket = requestTicket(origin)
+                    val ticket = requestTicket(serverBaseUrl)
                     authLog("cli-login -> ${if (ticket != null) "ticket ok" else "FAILED"}")
                     if (ticket != null) {
                         main.post {
@@ -80,12 +81,15 @@ class OidcLoginManager {
                                 !activity.isFinishing &&
                                 !activity.isDestroyed
                             ) {
-                                launchTab(activity, origin + ticket.loginUrl)
+                                launchTab(
+                                    activity,
+                                    resolveServerPath(serverBaseUrl, ticket.loginUrl),
+                                )
                             } else {
                                 authLog("skipping stale browser launch")
                             }
                         }
-                        token = pollForToken(origin, ticket.id)
+                        token = pollForToken(serverBaseUrl, ticket.id)
                         authLog(
                             "poll -> ${if (token != null) "token (len=${token.length})" else "no token"}",
                         )
@@ -132,8 +136,11 @@ class OidcLoginManager {
         val loginUrl: String,
     )
 
-    private fun requestTicket(origin: String): Ticket? {
-        val conn = (URL("$origin/auth/cli-login").openConnection() as HttpURLConnection)
+    private fun requestTicket(serverBaseUrl: String): Ticket? {
+        val conn = (
+            URL(serverEndpoint(serverBaseUrl, "auth/cli-login")).openConnection()
+                as HttpURLConnection
+        )
         conn.requestMethod = "POST"
         // Bodyless POST — set Content-Length explicitly; some servers/WAFs reject
         // a POST without it (411 Length Required).
@@ -145,10 +152,7 @@ class OidcLoginManager {
             val json = JSONObject(conn.inputStream.bufferedReader().use { it.readText() })
             val id = json.optString("ticket").ifEmpty { return null }
             val loginUrl = json.optString("login_url").ifEmpty { return null }
-            // The browser hand-off must stay on the pinned origin: [start]
-            // concatenates this onto it, so only a relative path may pass — an
-            // absolute URL or a scheme-relative `//host` would send the one-time
-            // ticket flow to a server-chosen destination instead.
+            // The browser hand-off must stay on the pinned server.
             if (!loginUrl.startsWith("/") || loginUrl.startsWith("//")) return null
             Ticket(id, loginUrl)
         } finally {
@@ -173,7 +177,7 @@ class OidcLoginManager {
     }
 
     private fun pollForToken(
-        origin: String,
+        serverBaseUrl: String,
         ticket: String,
     ): String? {
         val deadline = System.currentTimeMillis() + POLL_TIMEOUT_MS
@@ -182,7 +186,7 @@ class OidcLoginManager {
             Thread.sleep(POLL_INTERVAL_MS) // throws InterruptedException on shutdownNow()
             val conn = (
                 URL(
-                    "$origin/auth/cli-poll?ticket=$encoded",
+                    serverEndpoint(serverBaseUrl, "auth/cli-poll?ticket=$encoded"),
                 ).openConnection() as HttpURLConnection
             )
             conn.requestMethod = "GET"
@@ -218,5 +222,36 @@ class OidcLoginManager {
         const val POLL_INTERVAL_MS = 2_000L
         const val POLL_TIMEOUT_MS = 5 * 60 * 1_000L // mirrors the CLI's 5-minute window
         const val HTTP_TIMEOUT_MS = 10_000 // connect + read timeout for the login endpoints
+    }
+}
+
+internal fun serverEndpoint(
+    serverBaseUrl: String,
+    relativePath: String,
+): String = "${serverBaseUrl.trimEnd('/')}/${relativePath.trimStart('/')}"
+
+internal fun resolveServerPath(
+    serverBaseUrl: String,
+    absolutePath: String,
+): String {
+    val baseUri = URI(serverBaseUrl)
+    val originTarget = "${baseUri.scheme}://${baseUri.rawAuthority}$absolutePath"
+    val basePath =
+        baseUri.path
+            .orEmpty()
+            .trimEnd('/')
+            .ifBlank { "/" }
+    val targetPath =
+        URI(originTarget)
+            .path
+            .orEmpty()
+            .trimEnd('/')
+            .ifBlank { "/" }
+    val alreadyMounted =
+        basePath == "/" || targetPath == basePath || targetPath.startsWith("$basePath/")
+    return if (alreadyMounted) {
+        originTarget
+    } else {
+        serverEndpoint(serverBaseUrl, absolutePath)
     }
 }

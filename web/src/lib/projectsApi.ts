@@ -11,6 +11,8 @@
 // (`id`, `name`), so no boundary conversion is needed.
 
 import { authenticatedFetch } from "./identity";
+import { getProfileUnlockToken } from "./profileUnlock";
+import { getActiveProfileId } from "./profilesApi";
 
 /**
  * Default session settings a project stores, pre-filled into the new-chat
@@ -52,6 +54,7 @@ export interface Project {
   user_id?: string | null;
   created_at?: number;
   updated_at?: number | null;
+  profile_id?: string | null;
   /** Stored default session settings; `{}` when the project has none. */
   config?: ProjectConfig;
 }
@@ -72,7 +75,11 @@ async function readError(res: Response): Promise<string> {
 
 /** List the caller's projects (owner-scoped), oldest first. */
 export async function listProjects(): Promise<Project[]> {
-  const res = await authenticatedFetch("/v1/projects");
+  const params = new URLSearchParams();
+  const profileId = getActiveProfileId();
+  if (profileId) params.set("profile_id", profileId);
+  const suffix = params.size ? `?${params.toString()}` : "";
+  const res = await authenticatedFetch(`/v1/projects${suffix}`);
   if (!res.ok) throw new Error(await readError(res));
   const body = (await res.json()) as ProjectListResponse;
   return body.data;
@@ -90,21 +97,33 @@ export async function getProject(id: string): Promise<Project> {
  * server's message on a duplicate name (409) so callers can surface it inline.
  */
 export async function createProject(name: string, config?: ProjectConfig): Promise<Project> {
+  const profileId = getActiveProfileId();
   const res = await authenticatedFetch("/v1/projects", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(config ? { name, config } : { name }),
+    body: JSON.stringify({
+      name,
+      ...(config ? { config } : {}),
+      ...(profileId ? { profile_id: profileId } : {}),
+    }),
   });
   if (!res.ok) throw new Error(await readError(res));
   return (await res.json()) as Project;
 }
 
 /** Rename a project (O(1) — members reference the id, not the name string). */
-export async function renameProject(id: string, name: string): Promise<Project> {
+export async function renameProject(
+  id: string,
+  name: string,
+  adoptLegacyName?: string,
+): Promise<Project> {
   const res = await authenticatedFetch(`/v1/projects/${encodeURIComponent(id)}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name }),
+    body: JSON.stringify({
+      name,
+      ...(adoptLegacyName ? { adopt_legacy_name: adoptLegacyName } : {}),
+    }),
   });
   if (!res.ok) throw new Error(await readError(res));
   return (await res.json()) as Project;
@@ -121,6 +140,57 @@ export async function updateProjectConfig(id: string, config: ProjectConfig): Pr
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ config }),
   });
+  if (!res.ok) throw new Error(await readError(res));
+  return (await res.json()) as Project;
+}
+
+/** Move a project and all of its sessions into another profile. */
+export async function moveProject(id: string, profileId: string): Promise<Project> {
+  const destinationToken = getProfileUnlockToken(profileId);
+  const res = await authenticatedFetch(`/v1/projects/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+      ...(destinationToken ? { "X-Omnigent-Destination-Profile-Unlock": destinationToken } : {}),
+    },
+    body: JSON.stringify({ profile_id: profileId }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return (await res.json()) as Project;
+}
+
+/** Move the configured project directory and then move the whole project. */
+export async function moveProjectFolder(id: string, profileId: string): Promise<Project> {
+  const destinationToken = getProfileUnlockToken(profileId);
+  const res = await authenticatedFetch(`/v1/projects/${encodeURIComponent(id)}/move-folder`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(destinationToken ? { "X-Omnigent-Destination-Profile-Unlock": destinationToken } : {}),
+    },
+    body: JSON.stringify({ profile_id: profileId }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return (await res.json()) as Project;
+}
+
+/** Protect the existing project folder as another root and move the project. */
+export async function addProjectRootToPrivateProfile(
+  id: string,
+  profileId: string,
+): Promise<Project> {
+  const destinationToken = getProfileUnlockToken(profileId);
+  const res = await authenticatedFetch(
+    `/v1/profiles/${encodeURIComponent(profileId)}/protected-roots/projects`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(destinationToken ? { "X-Omnigent-Destination-Profile-Unlock": destinationToken } : {}),
+      },
+      body: JSON.stringify({ project_id: id }),
+    },
+  );
   if (!res.ok) throw new Error(await readError(res));
   return (await res.json()) as Project;
 }

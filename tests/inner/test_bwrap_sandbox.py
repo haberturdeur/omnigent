@@ -1167,6 +1167,25 @@ def test_mask_paths_hides_explicit_file_and_dir(tmp_path: Path) -> None:
     )
 
 
+def test_missing_explicit_mask_fails_closed(tmp_path: Path) -> None:
+    missing = tmp_path / "private"
+    policy = _make_policy(tmp_path, mask_paths=[missing])
+
+    with pytest.raises(OSError, match="explicit mask path disappeared"):
+        _make_backend().wrap_launcher_argv([sys.executable, "-c", "pass"], policy, tmp_path)
+
+
+def test_symlinked_explicit_mask_fails_closed(tmp_path: Path) -> None:
+    moved = tmp_path / "private-moved"
+    moved.mkdir()
+    protected = tmp_path / "private"
+    protected.symlink_to(moved, target_is_directory=True)
+    policy = _make_policy(tmp_path, mask_paths=[protected])
+
+    with pytest.raises(OSError, match="explicit mask path became a symlink"):
+        _make_backend().wrap_launcher_argv([sys.executable, "-c", "pass"], policy, tmp_path)
+
+
 def test_write_paths_root_dotfiles_are_masked(tmp_path: Path) -> None:
     """
     A ``write_paths`` root outside cwd gets the same dotfile masking as

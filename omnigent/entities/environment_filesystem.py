@@ -14,6 +14,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+# Full-file downloads stay bounded because the runner and server currently
+# buffer the payload while transporting it. Preview reads retain their 10 MiB
+# cap; this larger opt-in cap accommodates APKs and similar artifacts.
+MAX_FILE_DOWNLOAD_BYTES = 64 * 1024 * 1024
+
 # ── Filesystem entries ───────────────────────────────────────────
 
 

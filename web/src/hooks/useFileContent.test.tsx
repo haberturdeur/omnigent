@@ -35,6 +35,15 @@ function jsonResponse(body: unknown): Response {
   } as unknown as Response;
 }
 
+function blobResponse(body: Blob): Response {
+  return {
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    blob: async () => body,
+  } as unknown as Response;
+}
+
 function Wrap({ children }: { children: ReactNode }) {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: 0 } },
@@ -90,6 +99,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   cleanup();
   vi.unstubAllGlobals();
   // restore (not just reset) so any `vi.spyOn` a test installs is removed even
@@ -163,7 +173,8 @@ describe("fileContentToBlob", () => {
 // ---------------------------------------------------------------------------
 
 describe("triggerBrowserDownload", () => {
-  it("creates and clicks a synthetic link then removes it", () => {
+  it("keeps the object URL alive for asynchronous WebView download handling", () => {
+    vi.useFakeTimers();
     const blob = new Blob(["data"], { type: "text/plain" });
     const createdLinks: HTMLAnchorElement[] = [];
     const origCreateElement = document.createElement.bind(document);
@@ -189,6 +200,9 @@ describe("triggerBrowserDownload", () => {
     expect(link.click).toHaveBeenCalledOnce();
     // Element must have been removed from the DOM.
     expect(document.body.contains(link)).toBe(false);
+    expect(URL.revokeObjectURL).not.toHaveBeenCalled();
+
+    vi.runAllTimers();
     expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:fake");
 
     vi.restoreAllMocks();
@@ -201,16 +215,34 @@ describe("triggerBrowserDownload", () => {
 // ---------------------------------------------------------------------------
 
 describe("downloadWorkspaceFile", () => {
+  it("hands downloads to the Android shell without buffering a blob", async () => {
+    const downloadFile = vi.fn();
+    Object.defineProperty(window, "omnigentNative", {
+      configurable: true,
+      value: {
+        kind: "android",
+        serverBaseUrl: "https://example.test/omnigent",
+        downloadFile,
+      },
+    });
+
+    await downloadWorkspaceFile("sess_123", "build/app.apk");
+
+    expect(downloadFile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: "app.apk",
+        url:
+          "https://example.test/omnigent/v1/sessions/sess_123/resources/environments/default/" +
+          "filesystem-download/build/app.apk",
+      }),
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+    delete (window as unknown as { omnigentNative?: unknown }).omnigentNative;
+  });
+
   it("fetches the correct URL and triggers a download with the filename from the path", async () => {
     fetchMock.mockResolvedValueOnce(
-      jsonResponse({
-        object: "session.environment.filesystem.file_content",
-        path: "src/main.py",
-        content_type: "text/x-python",
-        encoding: "utf-8",
-        content: "print('hi')",
-        bytes: 11,
-      }),
+      blobResponse(new Blob(["print('hi')"], { type: "text/x-python" })),
     );
     const clickedLinks: string[] = [];
     const origCreateElement = document.createElement.bind(document);
@@ -230,41 +262,11 @@ describe("downloadWorkspaceFile", () => {
     // and `cache: "no-store"` (see lib/identity.ts) — assert the URL plus that
     // cache-bypass init rather than a bare single-arg call.
     expect(fetchMock).toHaveBeenCalledWith(
-      "/v1/sessions/sess_123/resources/environments/default/filesystem/src/main.py",
+      "/v1/sessions/sess_123/resources/environments/default/filesystem-download/src/main.py",
       expect.objectContaining({ cache: "no-store" }),
     );
     // The download filename is derived from the last path segment.
     expect(clickedLinks).toEqual(["main.py"]);
-
-    vi.restoreAllMocks();
-    vi.unstubAllGlobals();
-  });
-
-  it("logs a console warning when the server returns truncated: true", async () => {
-    fetchMock.mockResolvedValueOnce(
-      jsonResponse({
-        object: "session.environment.filesystem.file_content",
-        path: "big.txt",
-        content_type: "text/plain",
-        encoding: "utf-8",
-        content: "partial content",
-        bytes: 15,
-        truncated: true,
-      }),
-    );
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const origCreateElement = document.createElement.bind(document);
-    vi.spyOn(document, "createElement").mockImplementation((tag: string) => {
-      const el = origCreateElement(tag);
-      if (tag === "a") vi.spyOn(el as HTMLAnchorElement, "click").mockImplementation(() => {});
-      return el;
-    });
-    vi.stubGlobal("URL", { createObjectURL: vi.fn(() => "blob:x"), revokeObjectURL: vi.fn() });
-
-    await downloadWorkspaceFile("sess_abc", "big.txt");
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("big.txt"));
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("truncated"));
 
     vi.restoreAllMocks();
     vi.unstubAllGlobals();

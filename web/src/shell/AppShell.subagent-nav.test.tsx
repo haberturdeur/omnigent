@@ -76,6 +76,9 @@ vi.mock("@/hooks/useAgents", () => ({
   useUpdateMcpServer: () => ({ mutate: vi.fn(), isPending: false, error: null }),
   useDeleteMcpServer: () => ({ mutate: vi.fn(), isPending: false, error: null }),
 }));
+vi.mock("@/lib/profilesApi", () => ({
+  useActiveProfile: () => ({ isLoading: false }),
+}));
 vi.mock("./Sidebar", () => ({ Sidebar: () => <div data-testid="sidebar" /> }));
 vi.mock("./FilesPanel", () => ({
   FilesPanel: () => <div data-testid="files-panel" />,

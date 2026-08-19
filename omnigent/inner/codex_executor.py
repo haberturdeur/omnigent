@@ -2363,7 +2363,23 @@ class _CodexAppServerSession:
         # This prevents subagent sessions from polluting the user's Codex history.
         proc_env = {**self._env, "CODEX_HOME": str(self._codex_home_dir)}
         try:
-            argv = [self._codex_path, "app-server"]
+            launch_path = self._codex_path
+            process_cwd = Path(self._cwd or os.getcwd()).resolve(strict=False)
+            from .sandbox import (
+                create_exec_launcher,
+                resolve_sandbox,
+                with_spawn_env_allowlist,
+            )
+
+            outer_spec = OSEnvSpec(
+                cwd=str(process_cwd),
+                sandbox=OSEnvSandboxSpec(type="none"),
+            )
+            outer_policy = resolve_sandbox(outer_spec, process_cwd)
+            if outer_policy.active:
+                outer_policy = with_spawn_env_allowlist(outer_policy, list(proc_env))
+                launch_path = create_exec_launcher(self._codex_path, outer_policy)
+            argv = [launch_path, "app-server"]
             for override in self._codex_config_overrides:
                 argv.extend(["-c", override])
             self._proc = await _create_subprocess_exec(

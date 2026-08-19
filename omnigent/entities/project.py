@@ -38,5 +38,6 @@ class Project:
     name: str
     user_id: str | None
     created_at: int
+    profile_id: str | None = None
     updated_at: int | None = None
     config: dict[str, Any] = field(default_factory=dict)

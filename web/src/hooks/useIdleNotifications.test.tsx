@@ -19,6 +19,7 @@ vi.mock("@/lib/browserNotifications", () => ({
 // The native bridge is mocked so we can assert badge calls and toggle the
 // "running inside the desktop shell" discriminator without a real Electron env.
 vi.mock("@/lib/nativeBridge", () => ({
+  dismissNativeSessionNotifications: vi.fn(),
   isNativeShell: vi.fn(),
   setBadgeCount: vi.fn().mockResolvedValue(undefined),
   // Returns an unsubscribe fn; tests that exercise native click routing
@@ -37,6 +38,11 @@ vi.mock("@/lib/lastAssistantText", () => ({
   fetchLastAssistantText: vi.fn().mockResolvedValue(undefined),
 }));
 
+vi.mock("@/lib/profilesApi", () => ({
+  getActiveProfile: vi.fn().mockReturnValue(null),
+  useCurrentProfile: vi.fn().mockReturnValue(null),
+}));
+
 import { useConversations } from "@/hooks/useConversations";
 import type { Conversation } from "@/hooks/useConversations";
 import {
@@ -44,14 +50,21 @@ import {
   requestNotificationPermission,
   showNotification,
 } from "@/lib/browserNotifications";
-import { isNativeShell, onNativeNotificationActivated, setBadgeCount } from "@/lib/nativeBridge";
+import {
+  dismissNativeSessionNotifications,
+  isNativeShell,
+  onNativeNotificationActivated,
+  setBadgeCount,
+} from "@/lib/nativeBridge";
 import { fetchLastAssistantText } from "@/lib/lastAssistantText";
+import { getActiveProfile, useCurrentProfile } from "@/lib/profilesApi";
 import {
   resetReadStateForTests,
   markConversationSeen,
   seedReadState,
 } from "@/hooks/useUnseenConversations";
 import { useIdleNotifications } from "./useIdleNotifications";
+import { clearProfileNotificationActivity } from "@/lib/profileNotificationActivity";
 
 const useConvMock = vi.mocked(useConversations);
 const getPermMock = vi.mocked(getNotificationPermission);
@@ -60,7 +73,10 @@ const showMock = vi.mocked(showNotification);
 const isNativeMock = vi.mocked(isNativeShell);
 const onNativeActivatedMock = vi.mocked(onNativeNotificationActivated);
 const setBadgeMock = vi.mocked(setBadgeCount);
+const dismissNotificationsMock = vi.mocked(dismissNativeSessionNotifications);
 const fetchPreviewMock = vi.mocked(fetchLastAssistantText);
+const getActiveProfileMock = vi.mocked(getActiveProfile);
+const useCurrentProfileMock = vi.mocked(useCurrentProfile);
 
 /**
  * Flush pending microtasks so the async turn-end notification path (preview
@@ -124,10 +140,13 @@ beforeEach(() => {
   showMock.mockReset();
   requestPermMock.mockReset();
   setBadgeMock.mockClear();
+  dismissNotificationsMock.mockClear();
   onNativeActivatedMock.mockClear();
   onNativeActivatedMock.mockReturnValue(() => {});
   fetchPreviewMock.mockReset();
   fetchPreviewMock.mockResolvedValue(undefined);
+  getActiveProfileMock.mockReturnValue(null);
+  useCurrentProfileMock.mockReturnValue(null);
   getPermMock.mockReturnValue("granted");
   isNativeMock.mockReturnValue(false);
   // Default: window NOT focused, so attention events surface (the common
@@ -182,6 +201,147 @@ describe("useIdleNotifications turn-end transitions", () => {
       title: "a",
       body: "Fixed the badge bug and shipped it.",
     });
+  });
+
+  it("redacts title and preview for a private profile", async () => {
+    const privateProfile = {
+      id: "private-profile",
+      protection: { lock: "passcode" },
+    } as ReturnType<typeof getActiveProfile>;
+    getActiveProfileMock.mockReturnValue(privateProfile);
+    useCurrentProfileMock.mockReturnValue(privateProfile);
+    fetchPreviewMock.mockResolvedValue("Top secret result");
+    const running = { ...conv("a", "running"), profile_id: "private-profile" };
+    const idle = { ...conv("a", "idle"), profile_id: "private-profile" };
+    setConversations([running]);
+    const { rerender } = renderHook(() => useIdleNotifications());
+
+    setConversations([idle]);
+    rerender();
+    await settle();
+
+    expect(fetchPreviewMock).not.toHaveBeenCalled();
+    expect(showMock.mock.calls[0][0]).toMatchObject({
+      title: "Private Omnigent session",
+      body: "Open Omnigent to view this notification.",
+    });
+  });
+
+  it("invalidates a deferred notification when protection policy changes", async () => {
+    const privateProfile = {
+      id: "private-profile",
+      protection: { lock: "passcode" },
+    } as ReturnType<typeof getActiveProfile>;
+    useCurrentProfileMock.mockReturnValue(privateProfile);
+    const running = { ...conv("a", "running"), profile_id: "private-profile" };
+    const idle = { ...conv("a", "idle"), profile_id: "private-profile" };
+    setConversations([running]);
+    const { rerender } = renderHook(() => useIdleNotifications());
+
+    setConversations([idle]);
+    rerender();
+    useCurrentProfileMock.mockReturnValue({
+      ...privateProfile!,
+      protection: {},
+    });
+    rerender();
+    await settle();
+
+    expect(fetchPreviewMock).not.toHaveBeenCalled();
+    expect(showMock).not.toHaveBeenCalled();
+  });
+
+  it("does not disclose a pending preview after a profile becomes private", async () => {
+    let resolvePreview: (value: string) => void = () => undefined;
+    fetchPreviewMock.mockReturnValue(
+      new Promise((resolve) => {
+        resolvePreview = resolve;
+      }),
+    );
+    const publicProfile = {
+      id: "profile-one",
+      protection: {},
+    } as ReturnType<typeof getActiveProfile>;
+    useCurrentProfileMock.mockReturnValue(publicProfile);
+    setConversations([{ ...conv("a", "running"), profile_id: "profile-one" }]);
+    const { rerender } = renderHook(() => useIdleNotifications());
+
+    setConversations([{ ...conv("a", "idle"), profile_id: "profile-one" }]);
+    rerender();
+    await settle();
+    expect(fetchPreviewMock).toHaveBeenCalledWith("a");
+
+    useCurrentProfileMock.mockReturnValue({
+      ...publicProfile!,
+      protection: { lock: "passcode", notification_content: "generic" },
+    });
+    rerender();
+    await act(async () => resolvePreview("Sensitive result"));
+
+    expect(showMock).not.toHaveBeenCalled();
+  });
+
+  it("cancels deferred notifications when the active profile changes", async () => {
+    const firstProfile = {
+      id: "profile-one",
+      protection: {},
+    } as ReturnType<typeof getActiveProfile>;
+    useCurrentProfileMock.mockReturnValue(firstProfile);
+    setConversations([{ ...conv("a", "running"), profile_id: "profile-one" }]);
+    const { rerender } = renderHook(() => useIdleNotifications());
+
+    setConversations([{ ...conv("a", "idle"), profile_id: "profile-one" }]);
+    rerender();
+    useCurrentProfileMock.mockReturnValue({
+      id: "profile-two",
+      protection: {},
+    } as ReturnType<typeof getActiveProfile>);
+    setConversations([]);
+    rerender();
+    await settle();
+
+    expect(showMock).not.toHaveBeenCalled();
+  });
+
+  it("clears badge, queued work, and native notifications on an explicit profile clear", async () => {
+    isNativeMock.mockReturnValue(true);
+    const profile = { id: "profile-one", protection: {} } as ReturnType<typeof getActiveProfile>;
+    useCurrentProfileMock.mockReturnValue(profile);
+    setConversations([{ ...conv("a", "running"), profile_id: "profile-one" }]);
+    const { rerender } = renderHook(() => useIdleNotifications());
+    setConversations([{ ...conv("a", "idle"), profile_id: "profile-one" }]);
+    rerender();
+
+    act(() => clearProfileNotificationActivity("profile-one"));
+    await settle();
+
+    expect(setBadgeMock).toHaveBeenLastCalledWith(0);
+    expect(dismissNotificationsMock).toHaveBeenCalledWith("a");
+    expect(showMock).not.toHaveBeenCalled();
+  });
+
+  it("suppresses notifications and badges when notification content is disabled", async () => {
+    isNativeMock.mockReturnValue(true);
+    const profile = {
+      id: "private-profile",
+      protection: { lock: "passcode", notification_content: "disabled" },
+    } as ReturnType<typeof getActiveProfile>;
+    useCurrentProfileMock.mockReturnValue(profile);
+    markConversationSeen("a", 50);
+    const running = {
+      ...conv("a", "running"),
+      profile_id: "private-profile",
+      updated_at: 100,
+    };
+    const idle = { ...running, status: "idle" as const };
+    setConversations([running]);
+    const { rerender } = renderHook(() => useIdleNotifications());
+    setConversations([idle]);
+    rerender();
+    await settle();
+
+    expect(setBadgeMock).toHaveBeenLastCalledWith(0);
+    expect(showMock).not.toHaveBeenCalled();
   });
 
   it("navigates to the conversation when the notification is clicked", async () => {

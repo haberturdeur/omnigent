@@ -20,6 +20,8 @@ import { MemoryRouter, useSearchParams } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Comment } from "@/hooks/useComments";
 
+const downloadWorkspaceFileMock = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+
 // ── Mock heavy child components ───────────────────────────────────────────────
 
 vi.mock("./CodeViewer", () => ({
@@ -103,6 +105,7 @@ vi.mock("@/hooks/useComments", () => ({
 
 vi.mock("@/hooks/useFileContent", () => ({
   useFileContent: vi.fn(() => ({ data: { content: "", path: "file1.py" } })),
+  downloadWorkspaceFile: downloadWorkspaceFileMock,
 }));
 
 vi.mock("@/hooks/useFileDiff", () => ({
@@ -1337,6 +1340,15 @@ describe("FileViewer view-settings menu", () => {
     // Wrap / whitespace are diff-only — absent when the source view is showing.
     expect(screen.queryByRole("menuitem", { name: "Wrap lines" })).toBeNull();
     expect(screen.queryByRole("menuitem", { name: "Hide whitespace changes" })).toBeNull();
+  });
+
+  it("downloads the complete file instead of the preview payload", () => {
+    render(viewerTree({ open: true, path: "build/app.apk" }));
+    openSettingsMenu();
+
+    fireEvent.click(screen.getByRole("menuitem", { name: "Download file" }));
+
+    expect(downloadWorkspaceFileMock).toHaveBeenCalledWith("conv_1", "build/app.apk");
   });
 
   it("adds the wrap-lines and whitespace toggles in diff view", async () => {

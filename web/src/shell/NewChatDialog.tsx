@@ -156,6 +156,7 @@ import {
 import { cn } from "@/lib/utils";
 import { useOmnigentAnalytics } from "@/lib/analytics";
 import { isCurrentServerLocal } from "@/lib/serverOrigin";
+import { useCurrentProfile } from "@/lib/profilesApi";
 import {
   isFullySupportedNativeCodingAgent,
   isNativeCodingAgent,
@@ -2021,6 +2022,7 @@ export function NewChatLandingScreen() {
       visible: false,
     });
   }, []);
+  const activeProfile = useCurrentProfile();
   const heading = useHeading();
   const poweredBy = usePoweredBy();
   const serverUrl = getCliServerUrl();
@@ -2054,8 +2056,7 @@ export function NewChatLandingScreen() {
     // is falsely null, so wait rather than settle prematurely.
     if (projectParam !== "" && projectListLoading) return undefined;
     if (configProjectId !== null && projectConfigLoading) return undefined;
-    const c = storedProjectConfig;
-    if (!c) return {};
+    const c = { ...(activeProfile?.config ?? {}), ...(storedProjectConfig ?? {}) };
     return {
       hostId: c.host_id,
       workspace: c.workspace,
@@ -2064,11 +2065,14 @@ export function NewChatLandingScreen() {
     };
   }, [
     projectParam,
+    activeProfile,
     projectListLoading,
     configProjectId,
     projectConfigLoading,
     storedProjectConfig,
   ]);
+  const hasProfileDefaults =
+    projectParam === "" && activeProfile !== null && Object.keys(activeProfile.config).length > 0;
 
   // Pin the configured project agent into discovery so the recency-bounded
   // session scan (or its same-name dedup) can't drop or id-swap it out of
@@ -2581,7 +2585,7 @@ export function NewChatLandingScreen() {
   // host/workspace defaults below hold off until it settles so they can't win
   // the race against the project's stored values.
   const [prefill, setPrefill] = useState<ProjectPrefillState>(() =>
-    initialPrefillState(projectParam),
+    initialPrefillState(projectParam, hasProfileDefaults),
   );
   // The generic defaults gate on the location track only — the agent seed
   // waits on its own fetch and must not hold up the host/workspace fill.
@@ -2597,6 +2601,7 @@ export function NewChatLandingScreen() {
   // save be noticed even when the pencil re-opens the SAME project — the config
   // content changes while `projectParam` does not. `null` = not yet seeded.
   const seededConfigSigRef = useRef<string | null>(null);
+  const seededProfileIdRef = useRef<string | null>(activeProfile?.id ?? null);
   const prefillConfigSig = useMemo(
     () => (prefillConfig === undefined ? null : JSON.stringify(prefillConfig)),
     [prefillConfig],
@@ -2611,13 +2616,13 @@ export function NewChatLandingScreen() {
   // without this the already-settled machine would keep the stale seeds.
   useEffect(() => {
     const projectChanged = prefill.project !== projectParam;
+    const profileChanged = seededProfileIdRef.current !== (activeProfile?.id ?? null);
     const configChanged =
       !projectChanged &&
-      projectParam !== "" &&
       prefillConfigSig !== null &&
       seededConfigSigRef.current !== null &&
       prefillConfigSig !== seededConfigSigRef.current;
-    if (!projectChanged && !configChanged) return;
+    if (!projectChanged && !profileChanged && !configChanged) return;
     setSandboxSelected(false);
     setSelectedHostId(null);
     setPickedAgentId(projectParam !== "" ? null : readLastAgentId());
@@ -2631,9 +2636,10 @@ export function NewChatLandingScreen() {
     setPrefilledBranch("");
     seededHostRef.current = null;
     worktreeSeededForRef.current = null;
+    seededProfileIdRef.current = activeProfile?.id ?? null;
     seededConfigSigRef.current = prefillConfigSig;
-    setPrefill(initialPrefillState(projectParam));
-  }, [projectParam, prefill.project, prefillConfigSig]);
+    setPrefill(initialPrefillState(projectParam, hasProfileDefaults));
+  }, [projectParam, prefill.project, prefillConfigSig, hasProfileDefaults, activeProfile?.id]);
 
   // Record the config the machine settled from, once it's loaded and the
   // machine is done, so the reseed effect above can spot a later change to it
@@ -2739,7 +2745,8 @@ export function NewChatLandingScreen() {
   // The project's stored default base branch (Project settings), trimmed. Wins
   // over the user-global default (Settings › Git); an unset project default
   // falls through to the global one, then to blank (fork from current branch).
-  const projectBaseBranch = storedProjectConfig?.base_branch?.trim() || null;
+  const projectBaseBranch =
+    (storedProjectConfig?.base_branch ?? activeProfile?.config.base_branch)?.trim() || null;
 
   // The path the once-per-host auto-seed WOULD land on: the most-recent path,
   // else the derived home. Exposed as a memo so we can probe its repo for
@@ -4042,6 +4049,7 @@ export function NewChatLandingScreen() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             agent_id: effectiveAgentId,
+            profile_id: activeProfile?.id,
             ...(sandboxSelected
               ? {
                   host_type: "managed",

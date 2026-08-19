@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 from sqlalchemy import event, text
 
@@ -3023,7 +3025,8 @@ def test_create_session_with_agent_links_parent_and_inherits_root(
     matches on ``root_conversation_id``) and runner co-location would
     silently break for bundle-created children.
     """
-    parent = conversation_store.create_conversation(runner_id="runner_swa1")
+    profile_id = uuid.uuid4().hex
+    parent = conversation_store.create_conversation(runner_id="runner_swa1", profile_id=profile_id)
     created = conversation_store.create_session_with_agent(
         agent_id="9d05fc5310e5daf30deff6eaf5ecfbc8",
         agent_name="bundle-child-agent",
@@ -3043,6 +3046,7 @@ def test_create_session_with_agent_links_parent_and_inherits_root(
     # its own one-row tree and tree-scoped tools can't see it.
     assert fetched.root_conversation_id == parent.root_conversation_id
     assert fetched.runner_id == "runner_swa1"
+    assert fetched.profile_id == profile_id
 
 
 def test_create_session_with_agent_top_level_unchanged(
@@ -3591,6 +3595,19 @@ def test_fork_conversation_files_into_project(
 
     unfiled_fork = conversation_store.fork_conversation(source.id)
     assert unfiled_fork.project_id is None
+
+
+def test_fork_conversation_stays_in_profile(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    profile_id = uuid.uuid4().hex
+    source = conversation_store.create_conversation(title="src", profile_id=profile_id)
+
+    fork = conversation_store.fork_conversation(source.id, profile_id=profile_id)
+
+    assert fork.profile_id == profile_id
+    persisted = conversation_store.get_conversation(fork.id)
+    assert persisted is not None and persisted.profile_id == profile_id
 
 
 def test_fork_copies_terminal_launch_args_by_default(
@@ -5251,6 +5268,132 @@ def test_list_projects_scoped_by_accessible_by(
 
     # Alice only sees her project; Theirs is invisible to her.
     assert conversation_store.list_projects(accessible_by="alice@example.com") == ["Mine"]
+
+
+def test_list_projects_scoped_by_profile(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    """Legacy label-projects do not leak into another profile's sidebar."""
+    work_profile = uuid.uuid4().hex
+    personal_profile = uuid.uuid4().hex
+    work = conversation_store.create_conversation(profile_id=work_profile)
+    personal = conversation_store.create_conversation(profile_id=personal_profile)
+    conversation_store.set_labels(work.id, {"omni_project": "Work"})
+    conversation_store.set_labels(personal.id, {"omni_project": "Personal"})
+
+    assert conversation_store.list_projects(profile_id=work_profile) == ["Work"]
+    assert conversation_store.list_projects(profile_id=personal_profile) == ["Personal"]
+
+
+def test_list_conversations_scopes_owned_rows_by_profile(
+    conversation_store: SqlAlchemyConversationStore,
+    db_uri: str,
+) -> None:
+    """An owner's sessions are partitioned by profile while shared sessions remain visible."""
+    from omnigent.stores.permission_store.sqlalchemy_store import (
+        SqlAlchemyPermissionStore,
+    )
+
+    work_profile = uuid.uuid4().hex
+    personal_profile = uuid.uuid4().hex
+    bob_profile = uuid.uuid4().hex
+    work = conversation_store.create_conversation(title="Work", profile_id=work_profile)
+    personal = conversation_store.create_conversation(
+        title="Personal", profile_id=personal_profile
+    )
+    shared = conversation_store.create_conversation(title="Shared", profile_id=bob_profile)
+    perms = SqlAlchemyPermissionStore(db_uri)
+    for user in ("alice@example.com", "bob@example.com"):
+        perms.ensure_user(user)
+    perms.grant("alice@example.com", work.id, 4)
+    perms.grant("alice@example.com", personal.id, 4)
+    perms.grant("bob@example.com", shared.id, 4)
+    perms.grant("alice@example.com", shared.id, 1)
+
+    page = conversation_store.list_conversations(
+        accessible_by="alice@example.com", profile_id=work_profile, kind=None
+    )
+
+    assert {conversation.title for conversation in page.data} == {"Work", "Shared"}
+
+
+def test_list_conversations_excludes_profiles_before_pagination(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    """Hidden profiles do not consume page slots or reveal search matches."""
+    hidden_profile = uuid.uuid4().hex
+    visible_profile = uuid.uuid4().hex
+    for index in range(3):
+        conversation_store.create_conversation(
+            title=f"hidden needle {index}", profile_id=hidden_profile
+        )
+    visible = conversation_store.create_conversation(
+        title="visible needle", profile_id=visible_profile
+    )
+
+    page = conversation_store.list_conversations(
+        limit=1,
+        kind=None,
+        search_query="needle",
+        exclude_profile_ids=frozenset({hidden_profile}),
+    )
+
+    assert [conversation.id for conversation in page.data] == [visible.id]
+    assert page.has_more is False
+
+
+def test_locked_profile_exclusion_keeps_shared_grants_visible(
+    conversation_store: SqlAlchemyConversationStore,
+    db_uri: str,
+) -> None:
+    """A grantee sees a shared session even when its owner profile is locked."""
+    from omnigent.stores.permission_store.sqlalchemy_store import (
+        SqlAlchemyPermissionStore,
+    )
+
+    locked_profile = uuid.uuid4().hex
+    owned = conversation_store.create_conversation(
+        title="Owned private", profile_id=locked_profile
+    )
+    shared = conversation_store.create_conversation(
+        title="Shared private", profile_id=locked_profile
+    )
+    permissions = SqlAlchemyPermissionStore(db_uri)
+    for user in ("alice@example.com", "bob@example.com"):
+        permissions.ensure_user(user)
+    permissions.grant("alice@example.com", owned.id, 4)
+    permissions.grant("bob@example.com", shared.id, 4)
+    permissions.grant("alice@example.com", shared.id, 1)
+
+    page = conversation_store.list_conversations(
+        accessible_by="alice@example.com",
+        exclude_profile_ids=frozenset({locked_profile}),
+        kind=None,
+    )
+
+    assert [conversation.id for conversation in page.data] == [shared.id]
+
+
+def test_move_session_tree_rejects_a_new_descendant(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    """A stale traversal cannot split a newly expanded session tree."""
+    from omnigent.stores.conversation_store import ConversationTreeChangedError
+
+    source_profile = uuid.uuid4().hex
+    destination_profile = uuid.uuid4().hex
+    root = conversation_store.create_conversation(profile_id=source_profile)
+    conversation_store.create_conversation(
+        parent_conversation_id=root.id,
+        profile_id=source_profile,
+    )
+
+    with pytest.raises(ConversationTreeChangedError):
+        conversation_store.move_conversations_to_profile(
+            (root.id,),
+            expected_profile_id=source_profile,
+            destination_profile_id=destination_profile,
+        )
 
 
 def test_delete_label_removes_only_target_key(

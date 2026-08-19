@@ -5,16 +5,80 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
 from omnigent.runner.identity import (
     RUNNER_AUTH_SECRET_ENV_VARS,
     RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR,
+    RUNNER_ISOLATION_HOST_ID_ENV_VAR,
+    RUNNER_ISOLATION_MASKS_ENV_VAR,
+    RUNNER_PROTECTION_GENERATION_ENV_VAR,
+    RUNNER_SLICE_KEY_ENV_VAR,
     RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR,
+    runner_isolation_snapshot_from_env,
     strip_runner_auth_secrets,
     token_bound_runner_id,
 )
+
+
+def test_runner_isolation_snapshot_from_env_validates_and_normalizes() -> None:
+    """The runner accepts a complete canonical snapshot from its host."""
+    snapshot = runner_isolation_snapshot_from_env(
+        {
+            RUNNER_PROTECTION_GENERATION_ENV_VAR: "12",
+            RUNNER_ISOLATION_HOST_ID_ENV_VAR: "host-a",
+            RUNNER_SLICE_KEY_ENV_VAR: "host-a",
+            RUNNER_ISOLATION_MASKS_ENV_VAR: '["/srv/private/../private","/opt/secret"]',
+        }
+    )
+
+    assert snapshot == (12, "host-a", (Path("/srv/private"), Path("/opt/secret")))
+
+
+@pytest.mark.parametrize(
+    ("generation", "host_id", "masks"),
+    [
+        ("1", "host-a", None),
+        (None, "host-a", "[]"),
+        ("1", None, "[]"),
+        ("01", "host-a", "[]"),
+        ("-1", "host-a", "[]"),
+        ("1", "", "[]"),
+        ("1", "host-a", "{}"),
+        ("1", "host-a", '["relative"]'),
+        ("1", "host-a", '["/same","/same"]'),
+    ],
+)
+def test_runner_isolation_snapshot_from_env_rejects_malformed_values(
+    generation: str | None, host_id: str | None, masks: str | None
+) -> None:
+    """Malformed launch metadata fails closed at the runner boundary."""
+    env = {}
+    if generation is not None:
+        env[RUNNER_PROTECTION_GENERATION_ENV_VAR] = generation
+    if host_id is not None:
+        env[RUNNER_ISOLATION_HOST_ID_ENV_VAR] = host_id
+        env[RUNNER_SLICE_KEY_ENV_VAR] = host_id
+    if masks is not None:
+        env[RUNNER_ISOLATION_MASKS_ENV_VAR] = masks
+
+    with pytest.raises(RuntimeError, match=r"runner (isolation|protection)"):
+        runner_isolation_snapshot_from_env(env)
+
+
+def test_runner_isolation_snapshot_rejects_another_runner_host() -> None:
+    """The snapshot host must match the runner's launch/routing identity."""
+    with pytest.raises(RuntimeError, match="does not match"):
+        runner_isolation_snapshot_from_env(
+            {
+                RUNNER_PROTECTION_GENERATION_ENV_VAR: "1",
+                RUNNER_ISOLATION_HOST_ID_ENV_VAR: "host-a",
+                RUNNER_SLICE_KEY_ENV_VAR: "host-b",
+                RUNNER_ISOLATION_MASKS_ENV_VAR: "[]",
+            }
+        )
 
 
 def test_token_bound_runner_id_is_stable_and_token_scoped() -> None:

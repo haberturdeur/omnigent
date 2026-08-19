@@ -237,6 +237,32 @@ describe("authenticatedFetch", () => {
       expect(headers.get("X-Databricks-Omnigent-Slice-Key")).toBe("host_123");
     });
 
+    it("exposes the same shard header for native session downloads", async () => {
+      vi.doMock("./sessionHost", () => ({
+        getSessionHost: vi.fn(() => "host_native"),
+        setSessionHost: vi.fn(),
+        isHostKeyless: vi.fn(() => false),
+        markHostKeyless: vi.fn(),
+        clearHostKeyless: vi.fn(),
+        modalHostId: vi.fn(() => null),
+        resolveModalHost: vi.fn(),
+        isModalHostResolved: vi.fn(() => true),
+      }));
+      vi.doMock("./host", () => ({
+        getOmnigentHostConfig: vi.fn(() => ({ fetcher: () => fetch })),
+        hostFetch: fetchMock,
+        isDatabricksWorkspace: vi.fn(() => true),
+      }));
+      const { getAuthenticatedRequestHeaders } = await import("./identity");
+
+      const headers = await getAuthenticatedRequestHeaders(
+        "/v1/sessions/sess_native/resources/environments/default/filesystem-download/app.apk",
+      );
+
+      expect(headers.get("X-Databricks-Omnigent-Slice-Key")).toBe("host_native");
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
     it("stamps the slice-key header in standalone dev against a workspace", async () => {
       // `npm run dev` pointed at a workspace URL installs no fetcher, but it's
       // still a Databricks workspace (sharded) — the VITE_DATABRICKS_WORKSPACE

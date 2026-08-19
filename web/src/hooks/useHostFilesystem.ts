@@ -297,6 +297,16 @@ export async function hostDirectoryMissing(hostId: string, path: string): Promis
   }
 }
 
+/** Ensure a profile root exists on its selected host, creating parents as needed. */
+export async function ensureHostDirectory(hostId: string, path: string): Promise<string> {
+  const baseUrl = buildHostFilesystemUrl(hostId, path);
+  const separator = baseUrl.includes("?") ? "&" : "?";
+  const response = await authenticatedFetch(`${baseUrl}${separator}limit=1`);
+  if (response.ok) return path;
+  if (response.status === 404) return createHostDirectory(hostId, path);
+  throw new Error(await describeListError(response, path));
+}
+
 /** Shape returned by ``POST /v1/hosts/{id}/directories``. */
 interface CreateHostDirectoryResponse {
   object: string;

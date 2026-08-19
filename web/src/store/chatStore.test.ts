@@ -6638,6 +6638,7 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
     cost_control_mode_override?: "on" | "off" | null;
     parent_session_id?: string | null;
     model_options?: Record<string, unknown>[];
+    terminal_launch_args?: string[] | null;
   }
 
   /** Override the snapshot GET so a test can inject labels + overrides. */
@@ -6658,6 +6659,7 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
           cost_control_mode_override: overrides.cost_control_mode_override ?? null,
           parent_session_id: overrides.parent_session_id ?? null,
           model_options: overrides.model_options ?? [],
+          terminal_launch_args: overrides.terminal_launch_args ?? null,
         });
       }
       return defaultFetchHandler(input, init);
@@ -7495,6 +7497,37 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
     expect(sessionLabels.get("conv_plan_failure")).not.toHaveProperty(
       "omnigent.codex_native.collaboration_mode",
     );
+  });
+
+  it("hydrates and PATCHes the live Codex approval preset", async () => {
+    seedSession("conv_approval", []);
+    withSnapshot("conv_approval", {
+      labels: { "omnigent.wrapper": "codex-native-ui" },
+      terminal_launch_args: ["--sandbox", "read-only", "--ask-for-approval", "on-request"],
+    });
+    await useChatStore.getState().switchTo("conv_approval");
+    expect(useChatStore.getState().codexApprovalMode).toBe("read-only");
+
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url === "/v1/sessions/conv_approval" && init?.method === "PATCH") {
+        return mockResponse({
+          id: "conv_approval",
+          agent_id: "agent_xyz",
+          status: "idle",
+          created_at: 0,
+          labels: { "omnigent.wrapper": "codex-native-ui" },
+          terminal_launch_args: ["--sandbox", "danger-full-access", "--ask-for-approval", "never"],
+        });
+      }
+      return defaultFetchHandler(input, init);
+    });
+    fetchMock.mockClear();
+
+    await useChatStore.getState().setCodexApprovalMode("full-access");
+
+    expect(patchCallsFor("conv_approval")).toEqual([{ codex_approval_mode: "full-access" }]);
+    expect(useChatStore.getState().codexApprovalMode).toBe("full-access");
   });
 
   it("server-side overrides win over sticky pref and skip the PATCH", async () => {

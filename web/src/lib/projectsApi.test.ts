@@ -4,13 +4,17 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  addProjectRootToPrivateProfile,
   createProject,
   deleteProject,
   getProject,
   listProjects,
+  moveProject,
+  moveProjectFolder,
   renameProject,
   updateProjectConfig,
 } from "./projectsApi";
+import { setProfileUnlockToken } from "./profileUnlock";
 
 function mockResponse(body: unknown, init?: { ok?: boolean; status?: number }): Response {
   return {
@@ -117,6 +121,76 @@ describe("renameProject", () => {
     expect(url).toBe("/v1/projects/p%20a");
     expect(init.method).toBe("PATCH");
     expect(JSON.parse(init.body as string)).toEqual({ name: "Renamed" });
+  });
+
+  it("can request atomic adoption of a differently named legacy folder", async () => {
+    fetchMock.mockResolvedValueOnce(mockResponse({ id: "p_1", name: "Renamed" }));
+    await renameProject("p_1", "Renamed", "Legacy");
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({
+      name: "Renamed",
+      adopt_legacy_name: "Legacy",
+    });
+  });
+});
+
+describe("moveProject", () => {
+  it("PATCHes the destination profile with its scoped unlock token", async () => {
+    setProfileUnlockToken("profile-private", "destination-token");
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({ id: "p_1", name: "A", profile_id: "profile-private" }),
+    );
+
+    await moveProject("p_1", "profile-private");
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/v1/projects/p_1");
+    expect(init.method).toBe("PATCH");
+    expect(new Headers(init.headers).get("X-Omnigent-Destination-Profile-Unlock")).toBe(
+      "destination-token",
+    );
+    expect(JSON.parse(init.body as string)).toEqual({ profile_id: "profile-private" });
+    setProfileUnlockToken("profile-private", null);
+  });
+});
+
+describe("moveProjectFolder", () => {
+  it("POSTs the destination profile with its scoped unlock token", async () => {
+    setProfileUnlockToken("profile-private", "destination-token");
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({ id: "p_1", name: "A", profile_id: "profile-private" }),
+    );
+
+    await moveProjectFolder("p_1", "profile-private");
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/v1/projects/p_1/move-folder");
+    expect(init.method).toBe("POST");
+    expect(new Headers(init.headers).get("X-Omnigent-Destination-Profile-Unlock")).toBe(
+      "destination-token",
+    );
+    expect(JSON.parse(init.body as string)).toEqual({ profile_id: "profile-private" });
+    setProfileUnlockToken("profile-private", null);
+  });
+});
+
+describe("addProjectRootToPrivateProfile", () => {
+  it("POSTs the project and destination unlock token", async () => {
+    setProfileUnlockToken("profile-private", "destination-token");
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({ id: "p_1", name: "A", profile_id: "profile-private" }),
+    );
+
+    await addProjectRootToPrivateProfile("p_1", "profile-private");
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/v1/profiles/profile-private/protected-roots/projects");
+    expect(init.method).toBe("POST");
+    expect(new Headers(init.headers).get("X-Omnigent-Destination-Profile-Unlock")).toBe(
+      "destination-token",
+    );
+    expect(JSON.parse(init.body as string)).toEqual({ project_id: "p_1" });
+    setProfileUnlockToken("profile-private", null);
   });
 });
 

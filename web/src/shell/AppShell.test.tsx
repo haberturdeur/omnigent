@@ -244,6 +244,11 @@ import type { Agent } from "@/hooks/useAgents";
 const useSessionAgentMock = vi.mocked(useSessionAgent);
 
 import { AppShell } from "./AppShell";
+
+vi.mock("@/lib/profilesApi", () => ({
+  useActiveProfile: () => ({ isLoading: false }),
+  useCurrentProfile: () => null,
+}));
 import { useTerminalFirst } from "./TerminalFirstContext";
 import { useForkDialog } from "./ForkDialogContext";
 import { useChatStore } from "@/store/chatStore";

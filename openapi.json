@@ -48,6 +48,21 @@
         "title": "AddCommentRequest",
         "type": "object"
       },
+      "AddProjectPrivateRootRequest": {
+        "additionalProperties": false,
+        "description": "Protect a project's existing workspace and move it into the profile.",
+        "properties": {
+          "project_id": {
+            "title": "Project Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project_id"
+        ],
+        "title": "AddProjectPrivateRootRequest",
+        "type": "object"
+      },
       "AgentObject": {
         "description": "API representation of a registered agent.",
         "properties": {
@@ -1162,6 +1177,38 @@
         "title": "CompletedEvent",
         "type": "object"
       },
+      "ConfigureProfileProtectionRequest": {
+        "additionalProperties": false,
+        "description": "Configure the passcode and protected roots for one private profile.",
+        "properties": {
+          "passcode": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Passcode"
+          },
+          "protected_roots": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 16,
+            "minItems": 1,
+            "title": "Protected Roots",
+            "type": "array"
+          }
+        },
+        "required": [
+          "protected_roots"
+        ],
+        "title": "ConfigureProfileProtectionRequest",
+        "type": "object"
+      },
       "ConversationDeleted": {
         "description": "Confirmation payload returned after deleting a conversation.",
         "properties": {
@@ -1378,6 +1425,55 @@
         "title": "CreateDirectoryRequest",
         "type": "object"
       },
+      "CreateProfileRequest": {
+        "additionalProperties": false,
+        "description": "Request body for `POST /v1/profiles`.",
+        "properties": {
+          "color": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Color"
+          },
+          "config": {
+            "additionalProperties": true,
+            "title": "Config",
+            "type": "object"
+          },
+          "icon": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Icon"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "protection": {
+            "additionalProperties": true,
+            "title": "Protection",
+            "type": "object"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "CreateProfileRequest",
+        "type": "object"
+      },
       "CreateProjectRequest": {
         "additionalProperties": false,
         "description": "Request body for `POST /v1/projects`.",
@@ -1392,6 +1488,17 @@
             "description": "Human-readable project name. Trimmed; must be non-empty and at most 100 characters; unique among the caller's projects.",
             "title": "Name",
             "type": "string"
+          },
+          "profile_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Profile Id"
           }
         },
         "required": [
@@ -2273,6 +2380,17 @@
             "title": "Items",
             "type": "array"
           },
+          "profile_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Profile Id"
+          },
           "project_id": {
             "anyOf": [
               {
@@ -2818,6 +2936,20 @@
         "title": "ModelUsage",
         "type": "object"
       },
+      "MoveProjectFolderRequest": {
+        "description": "Move a project's folder below a destination profile's workspace.",
+        "properties": {
+          "profile_id": {
+            "title": "Profile Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "profile_id"
+        ],
+        "title": "MoveProjectFolderRequest",
+        "type": "object"
+      },
       "NativeModelOption": {
         "additionalProperties": true,
         "description": "One runner-owned native model-picker row.",
@@ -2924,6 +3056,53 @@
           "item"
         ],
         "title": "NativeToolData",
+        "type": "object"
+      },
+      "NotificationAcknowledgementRequest": {
+        "properties": {
+          "session_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Session Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id"
+        ],
+        "title": "NotificationAcknowledgementRequest",
+        "type": "object"
+      },
+      "NotificationActivityRequest": {
+        "properties": {
+          "active": {
+            "default": false,
+            "title": "Active",
+            "type": "boolean"
+          },
+          "foreground": {
+            "title": "Foreground",
+            "type": "boolean"
+          },
+          "mobile_delay_seconds": {
+            "default": 60,
+            "format": "int64",
+            "maximum": 3600.0,
+            "minimum": 0.0,
+            "title": "Mobile Delay Seconds",
+            "type": "integer"
+          },
+          "platform": {
+            "pattern": "^(web|electron|android|ios)$",
+            "title": "Platform",
+            "type": "string"
+          }
+        },
+        "required": [
+          "platform",
+          "foreground"
+        ],
+        "title": "NotificationActivityRequest",
         "type": "object"
       },
       "OutputFileDoneEvent": {
@@ -3289,6 +3468,48 @@
           "joined_at"
         ],
         "title": "PresenceViewer",
+        "type": "object"
+      },
+      "PushKeys": {
+        "properties": {
+          "auth": {
+            "maxLength": 128,
+            "minLength": 8,
+            "title": "Auth",
+            "type": "string"
+          },
+          "p256dh": {
+            "maxLength": 256,
+            "minLength": 20,
+            "title": "P256Dh",
+            "type": "string"
+          }
+        },
+        "required": [
+          "p256dh",
+          "auth"
+        ],
+        "title": "PushKeys",
+        "type": "object"
+      },
+      "PushSubscriptionRequest": {
+        "properties": {
+          "endpoint": {
+            "format": "uri",
+            "maxLength": 2083,
+            "minLength": 1,
+            "title": "Endpoint",
+            "type": "string"
+          },
+          "keys": {
+            "$ref": "#/components/schemas/PushKeys"
+          }
+        },
+        "required": [
+          "endpoint",
+          "keys"
+        ],
+        "title": "PushSubscriptionRequest",
         "type": "object"
       },
       "QueuedEvent": {
@@ -6060,6 +6281,17 @@
             "description": "The requesting user's numeric permission level on this session: `1` = read, `2` = edit, `3` = manage. `None` when permissions are disabled (single-user mode without a permission store).",
             "title": "Permission Level"
           },
+          "profile_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Profile Id"
+          },
           "project_id": {
             "anyOf": [
               {
@@ -7401,6 +7633,23 @@
         "title": "TurnStartedEvent",
         "type": "object"
       },
+      "UnlockProfileRequest": {
+        "additionalProperties": false,
+        "description": "Unlock one private profile for the current browser or device.",
+        "properties": {
+          "passcode": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Passcode",
+            "type": "string"
+          }
+        },
+        "required": [
+          "passcode"
+        ],
+        "title": "UnlockProfileRequest",
+        "type": "object"
+      },
       "UpdateCodexGoalStatusRequest": {
         "additionalProperties": false,
         "description": "Request body for `PATCH /v1/sessions/{id}/codex_goal/status`.\n\nCodex app-server represents pause/resume as `thread/goal/set` status\nupdates. Omnigent exposes the two user-driven transitions explicitly:\n`\"paused\"` pauses an active goal, and `\"active\"` resumes a paused,\nblocked, or usage-limited goal.",
@@ -7496,10 +7745,88 @@
         "title": "UpdateDefaultPolicyRequest",
         "type": "object"
       },
+      "UpdateProfileRequest": {
+        "additionalProperties": false,
+        "description": "Request body for `PATCH /v1/profiles/{profile_id}`.",
+        "properties": {
+          "color": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Color"
+          },
+          "config": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Config"
+          },
+          "icon": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Icon"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "protection": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Protection"
+          }
+        },
+        "title": "UpdateProfileRequest",
+        "type": "object"
+      },
       "UpdateProjectRequest": {
         "additionalProperties": false,
         "description": "Request body for `PATCH /v1/projects/{project_id}`.\n\nAll fields optional; `None` leaves a field unchanged.",
         "properties": {
+          "adopt_legacy_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Adopt Legacy Name"
+          },
           "config": {
             "anyOf": [
               {
@@ -7524,6 +7851,17 @@
             ],
             "description": "New project name. `None` leaves it unchanged; otherwise trimmed, non-empty, at most 100 characters.",
             "title": "Name"
+          },
+          "profile_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Profile Id"
           }
         },
         "title": "UpdateProjectRequest",
@@ -7588,6 +7926,18 @@
             ],
             "description": "New archived state. `True` archives (hides the session from the default sidebar listing), `False` unarchives, `None` leaves unchanged. Owner-only (unlike `title`, which needs only edit access).",
             "title": "Archived"
+          },
+          "codex_approval_mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Live Codex permission preset. `\"default\"` uses workspace-write with on-request approvals, `\"read-only\"` requires approval for writes and commands, and `\"full-access\"` removes Codex filesystem/network restrictions. The server applies the setting to the loaded Codex thread before persisting its resume args.",
+            "title": "Codex Approval Mode"
           },
           "collaboration_mode": {
             "anyOf": [
@@ -7663,6 +8013,18 @@
             ],
             "description": "Claude-native permission mode to switch a running session to, e.g. `\"auto\"`. Only the modes Claude Code's shift+tab cycle can reach are accepted (`default`, `acceptEdits`, `plan`, `auto`) \u2014 `dontAsk` and `bypassPermissions` are launch-only. Only valid for sessions stamped with the claude-native wrapper label. Unlike the other fields here the switch is applied by the live TUI, so a failure to reach the mode is surfaced as an error rather than persisted. Omitted leaves unchanged.",
             "title": "Permission Mode"
+          },
+          "profile_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Move an unfiled top-level session and its sub-agent tree into another profile. Owner-only. The source and destination profiles must be unlocked, and private-profile workspace boundaries still apply. Omit the field to leave profile ownership unchanged.",
+            "title": "Profile Id"
           },
           "project_id": {
             "anyOf": [
@@ -8028,6 +8390,19 @@
           "type"
         ],
         "title": "ValidationError",
+        "type": "object"
+      },
+      "WebPushConfigResponse": {
+        "properties": {
+          "vapid_public_key": {
+            "title": "Vapid Public Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "vapid_public_key"
+        ],
+        "title": "WebPushConfigResponse",
         "type": "object"
       }
     },
@@ -9379,10 +9754,528 @@
         ]
       }
     },
+    "/v1/profiles": {
+      "get": {
+        "operationId": "list_profiles_v1_profiles_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Profiles V1 Profiles Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Profiles",
+        "tags": [
+          "profiles"
+        ]
+      },
+      "post": {
+        "operationId": "create_profile_v1_profiles_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateProfileRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create Profile V1 Profiles Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Profile",
+        "tags": [
+          "profiles"
+        ]
+      }
+    },
+    "/v1/profiles/{profile_id}": {
+      "delete": {
+        "operationId": "delete_profile_v1_profiles__profile_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "profile_id",
+            "required": true,
+            "schema": {
+              "title": "Profile Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Delete Profile V1 Profiles  Profile Id  Delete",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Profile",
+        "tags": [
+          "profiles"
+        ]
+      },
+      "get": {
+        "operationId": "get_profile_v1_profiles__profile_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "profile_id",
+            "required": true,
+            "schema": {
+              "title": "Profile Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Profile V1 Profiles  Profile Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Profile",
+        "tags": [
+          "profiles"
+        ]
+      },
+      "patch": {
+        "operationId": "update_profile_v1_profiles__profile_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "profile_id",
+            "required": true,
+            "schema": {
+              "title": "Profile Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateProfileRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Update Profile V1 Profiles  Profile Id  Patch",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Profile",
+        "tags": [
+          "profiles"
+        ]
+      }
+    },
+    "/v1/profiles/{profile_id}/protected-roots/projects": {
+      "post": {
+        "description": "Protect a project's current folder and move its metadata here.",
+        "operationId": "add_project_private_root_v1_profiles__profile_id__protected_roots_projects_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "profile_id",
+            "required": true,
+            "schema": {
+              "title": "Profile Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddProjectPrivateRootRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Add Project Private Root V1 Profiles  Profile Id  Protected Roots Projects Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Add Project Private Root",
+        "tags": [
+          "profiles"
+        ]
+      }
+    },
+    "/v1/profiles/{profile_id}/protection": {
+      "delete": {
+        "description": "Remove a profile from the private domain after explicit unlock.",
+        "operationId": "disable_protection_v1_profiles__profile_id__protection_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "profile_id",
+            "required": true,
+            "schema": {
+              "title": "Profile Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Disable Protection V1 Profiles  Profile Id  Protection Delete",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Disable Protection",
+        "tags": [
+          "profiles"
+        ]
+      },
+      "get": {
+        "description": "Return lock state without exposing the persisted passcode hash.",
+        "operationId": "get_protection_status_v1_profiles__profile_id__protection_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "profile_id",
+            "required": true,
+            "schema": {
+              "title": "Profile Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Protection Status V1 Profiles  Profile Id  Protection Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Protection Status",
+        "tags": [
+          "profiles"
+        ]
+      },
+      "put": {
+        "description": "Enable or update one profile's lock and bwrap isolation roots.",
+        "operationId": "configure_protection_v1_profiles__profile_id__protection_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "profile_id",
+            "required": true,
+            "schema": {
+              "title": "Profile Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfigureProfileProtectionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Configure Protection V1 Profiles  Profile Id  Protection Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Configure Protection",
+        "tags": [
+          "profiles"
+        ]
+      }
+    },
+    "/v1/profiles/{profile_id}/unlock": {
+      "delete": {
+        "description": "Forget the current tab's unlock bearer.",
+        "operationId": "lock_profile_v1_profiles__profile_id__unlock_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "profile_id",
+            "required": true,
+            "schema": {
+              "title": "Profile Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "boolean"
+                  },
+                  "title": "Response Lock Profile V1 Profiles  Profile Id  Unlock Delete",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Lock Profile",
+        "tags": [
+          "profiles"
+        ]
+      },
+      "post": {
+        "description": "Exchange a profile passcode for a process-memory bearer.",
+        "operationId": "unlock_profile_v1_profiles__profile_id__unlock_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "profile_id",
+            "required": true,
+            "schema": {
+              "title": "Profile Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UnlockProfileRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Unlock Profile V1 Profiles  Profile Id  Unlock Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Unlock Profile",
+        "tags": [
+          "profiles"
+        ]
+      }
+    },
     "/v1/projects": {
       "get": {
         "description": "List the caller's projects.\n\n**Returns:** `{\"object\": \"list\", \"data\": [...]}`.\n\n**Raises**\n\n- `OmnigentError` \u2014 401 if unauthenticated in multi-user mode.",
         "operationId": "list_projects_v1_projects_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "profile_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Profile Id"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -9395,6 +10288,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "List Projects",
@@ -9586,6 +10489,242 @@
         "summary": "Update Project",
         "tags": [
           "projects"
+        ]
+      }
+    },
+    "/v1/projects/{project_id}/move-folder": {
+      "post": {
+        "description": "Move a project directory and atomically re-home its metadata.",
+        "operationId": "move_project_folder_v1_projects__project_id__move_folder_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MoveProjectFolderRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Move Project Folder V1 Projects  Project Id  Move Folder Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Move Project Folder",
+        "tags": [
+          "projects"
+        ]
+      }
+    },
+    "/v1/push/acknowledgements": {
+      "post": {
+        "operationId": "acknowledge_notification_v1_push_acknowledgements_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NotificationAcknowledgementRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Acknowledge Notification",
+        "tags": [
+          "push_notifications"
+        ]
+      }
+    },
+    "/v1/push/activity/{device_id}": {
+      "post": {
+        "operationId": "record_activity_v1_push_activity__device_id__post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "device_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9._-]{1,128}$",
+              "title": "Device Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NotificationActivityRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Record Activity",
+        "tags": [
+          "push_notifications"
+        ]
+      }
+    },
+    "/v1/push/config": {
+      "get": {
+        "operationId": "get_config_v1_push_config_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebPushConfigResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Config",
+        "tags": [
+          "push_notifications"
+        ]
+      }
+    },
+    "/v1/push/subscriptions/{device_id}": {
+      "delete": {
+        "operationId": "delete_subscription_v1_push_subscriptions__device_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "device_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9._-]{1,128}$",
+              "title": "Device Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Subscription",
+        "tags": [
+          "push_notifications"
+        ]
+      },
+      "put": {
+        "operationId": "put_subscription_v1_push_subscriptions__device_id__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "device_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9._-]{1,128}$",
+              "title": "Device Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PushSubscriptionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Put Subscription",
+        "tags": [
+          "push_notifications"
         ]
       }
     },
@@ -9905,6 +11044,22 @@
               "title": "Pinned",
               "type": "boolean"
             }
+          },
+          {
+            "in": "query",
+            "name": "profile_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Profile Id"
+            }
           }
         ],
         "responses": {
@@ -9957,6 +11112,24 @@
       "get": {
         "description": "Return the caller's projects as `{\"id\", \"name\"}` pairs, ordered\nalphabetically by name.\n\nDual-reads both project representations and unions them by name:\n- **First-class projects** (`project_store`) \u2014 carry an `id` and\n  appear even when empty (the whole point of the first-class entity).\n- **Legacy label-projects** (implicit `omni_project` label) \u2014 exist\n  while at least one owned session carries the label; `id` is\n  `None` until such a project is promoted to first-class.\n\nA name present in both sources collapses to one entry that keeps the\nfirst-class `id`. Filing is owner-only, so both halves are scoped to\nthe caller (label-projects to their owned sessions, first-class to\ntheir owned rows) \u2014 a project shared to them but owned by another user\ndoes not surface as one of their own folders.\n\n**Returns:** List of `SessionProjectSummary` ordered by name.",
         "operationId": "list_session_projects_v1_sessions_projects_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "profile_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Profile Id"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -9971,6 +11144,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "List Session Projects",

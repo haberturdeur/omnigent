@@ -63,7 +63,7 @@ from omnigent.inner._acp_omnigent_mcp import OmnigentAcpMcp
 from omnigent.inner.acp_extension import NO_ACP_EXTENSION, AcpExtension
 from omnigent.inner.acp_subagents import SubAgentActivity, SubAgentStart, read_subagent_events
 from omnigent.inner.agent_env import clean_agent_env, declared_passthrough
-from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
+from omnigent.inner.datamodel import OSEnvSpec
 from omnigent.inner.executor import (
     Executor,
     ExecutorConfig,
@@ -444,9 +444,6 @@ class AcpExecutor(Executor):
         rest = self._argv[1:]
         os_env = self._os_env
         if os_env is None:
-            return binary, rest
-        sandbox_spec = os_env.sandbox or OSEnvSandboxSpec()
-        if sandbox_spec.type == "none":
             return binary, rest
         try:
             from .sandbox import (

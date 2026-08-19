@@ -79,6 +79,7 @@ def _add_session(
     cost: float,
     by_model: dict[str, dict[str, float]],
     title: str,
+    profile_id: str | None = None,
 ) -> str:
     # create_conversation stamps updated_at from now_epoch; pin it so the
     # session lands at a specific time. set_session_usage does not touch it.
@@ -86,7 +87,11 @@ def _add_session(
         "omnigent.stores.conversation_store.sqlalchemy_store.now_epoch",
         lambda: ts,
     )
-    conv = store.create_conversation(title=title, agent_id=_AGENT_ID)
+    conv = store.create_conversation(
+        title=title,
+        agent_id=_AGENT_ID,
+        profile_id=profile_id,
+    )
     store.set_session_usage(conv.id, {"total_cost_usd": cost, "by_model": by_model})
     return conv.id
 
@@ -226,6 +231,38 @@ def test_build_usage_report_empty(db_uri: str) -> None:
     assert report.cost_last_7d == 0.0
     assert report.cost_last_30d == 0.0
     assert report.total_cost_usd == 0.0
+
+
+def test_locked_profile_redacts_user_wide_rollup(
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """User-wide totals must not reveal activity hidden by a profile lock."""
+    store = SqlAlchemyConversationStore(db_uri)
+    store.add_daily_cost(RESERVED_USER_LOCAL, "2026-07-22", 12.5)
+    _add_session(
+        store,
+        monkeypatch,
+        ts=1_784_678_400,
+        cost=12.5,
+        by_model={"model-a": {"total_cost_usd": 12.5}},
+        title="private activity",
+        profile_id="0123456789abcdef0123456789abcdee",
+    )
+    monkeypatch.setattr("omnigent.db.utils.now_epoch", lambda: 1_784_678_400)
+    monkeypatch.setattr(
+        "omnigent.server.routes.usage.profile_is_accessible",
+        lambda _profile_id, _token: False,
+    )
+
+    report = _build_usage_report(store, None, include_page_details=True)
+
+    assert report.sessions == []
+    assert report.cost_today == 0.0
+    assert report.cost_last_7d == 0.0
+    assert report.cost_last_30d == 0.0
+    assert report.total_cost_usd == 0.0
+    assert report.daily_costs == []
 
 
 def test_build_usage_report_unpriced_session(

@@ -4,15 +4,20 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from typing import Any, cast
 
 import httpx
 import pytest
+from fastapi import FastAPI
 
 from omnigent.db.utils import builtin_agent_id
+from omnigent.entities import Profile
 from omnigent.errors import OmnigentError
-from omnigent.server.routes.imports import _stream_local_sessions_from_host
+from omnigent.server.routes import imports as imports_route
+from omnigent.server.routes.imports import _stream_local_sessions_from_host, create_imports_router
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
+from omnigent.stores.profile_store import ProfileStore
 
 
 def _seed_claude_agent(db_uri: str) -> str:
@@ -26,13 +31,93 @@ def _seed_claude_agent(db_uri: str) -> str:
     return agent_id
 
 
+async def test_import_into_host_bound_private_profile_keeps_host_scope(
+    db_uri: str,
+    monkeypatch: Any,
+) -> None:
+    """A profile-selected import validates and stores its configured host."""
+    _seed_claude_agent(db_uri)
+    profile = Profile(
+        id="11111111111111111111111111111111",
+        name="Private",
+        user_id=None,
+        config={"host_id": "22222222222222222222222222222222"},
+        protection={"lock": "passcode"},
+        created_at=1,
+    )
+
+    class Profiles:
+        def get(self, profile_id: str, *, user_id: str | None) -> Profile | None:
+            return profile if profile_id == profile.id and user_id is None else None
+
+    seen_hosts: list[str | None] = []
+    monkeypatch.setattr(imports_route, "profile_is_accessible", lambda *_: True)
+    monkeypatch.setattr(
+        imports_route,
+        "get_profile_protection_by_id",
+        lambda profile_id: SimpleNamespace(
+            profile_id=profile_id,
+            host_id=profile.config["host_id"],
+        ),
+    )
+    monkeypatch.setattr(
+        imports_route,
+        "protected_profile_for_workspace",
+        lambda workspace, *, host_id=None: seen_hosts.append(host_id) or profile.id,
+    )
+    monkeypatch.setattr(
+        imports_route,
+        "workspace_belongs_to_profile",
+        lambda profile_id, workspace, *, host_id=None: seen_hosts.append(host_id) or True,
+    )
+
+    conversations = SqlAlchemyConversationStore(db_uri)
+    app = FastAPI()
+    app.include_router(
+        create_imports_router(
+            conversations,
+            SqlAlchemyAgentStore(db_uri),
+            profile_store=cast(ProfileStore, Profiles()),
+        ),
+        prefix="/v1",
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/v1/imports",
+            json={
+                "source": "claude",
+                "external_session_id": "host-private-import",
+                "workspace": "/private/repo",
+                "profile_id": profile.id,
+                "items": [
+                    {
+                        "type": "message",
+                        "response_id": "claude:private",
+                        "data": {
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "hello"}],
+                        },
+                    }
+                ],
+            },
+        )
+
+    assert response.status_code == 201, response.text
+    imported = conversations.get_conversation(response.json()["session_id"])
+    assert imported is not None
+    assert imported.profile_id == profile.id
+    assert imported.host_id == profile.config["host_id"]
+    assert seen_hosts == [profile.config["host_id"], profile.config["host_id"]]
+
+
 async def test_import_session_creates_normal_session_and_blocks_duplicate(
     client: httpx.AsyncClient,
     db_uri: str,
 ) -> None:
     """An import creates one native session and a retry is rejected."""
     agent_id = _seed_claude_agent(db_uri)
-    payload = {
+    payload: dict[str, Any] = {
         "source": "claude",
         "external_session_id": "claude-session-1",
         "workspace": "/repo",
@@ -150,7 +235,7 @@ async def test_force_import_replaces_existing_session(
 ) -> None:
     """A forced retry replaces the transcript while retaining its stable id."""
     _seed_claude_agent(db_uri)
-    payload = {
+    payload: dict[str, Any] = {
         "source": "claude",
         "external_session_id": "claude-force-1",
         "workspace": "/repo/old",

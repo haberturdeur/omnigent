@@ -1,5 +1,6 @@
 import type * as UseConversationsModule from "@/hooks/useConversations";
 import type * as AgentLabelsModule from "@/lib/agentLabels";
+import type * as ProfilesApiModule from "@/lib/profilesApi";
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -13,6 +14,7 @@ import type { AvailableAgent } from "@/hooks/useAvailableAgents";
 import { useAvailableAgents } from "@/hooks/useAvailableAgents";
 import { useProjectConfig, useProjects } from "@/hooks/useConversations";
 import type { ProjectConfig } from "@/lib/projectsApi";
+import type { Profile } from "@/lib/profilesApi";
 import { useHostWorktrees } from "@/hooks/useHostWorktrees";
 import type { HostWorktree } from "@/hooks/useHostWorktrees";
 import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
@@ -24,6 +26,9 @@ import { NewChatLandingScreen, resetLandingDraft } from "./NewChatDialog";
 // unset falls through to the composer's generic defaults (last host, recent
 // workspace, last-used agent). These tests pin those seeding rules.
 const navigateMock = vi.fn();
+const { currentProfileRef } = vi.hoisted(() => ({
+  currentProfileRef: { current: null as Profile | null },
+}));
 
 const RECENT_KEY = "omnigent:recent-workspaces";
 const RECENT_WORKSPACE = "/Users/corey/universe/src/foo";
@@ -42,6 +47,10 @@ vi.mock("@/store/chatStore", () => ({
 }));
 
 vi.mock("@/lib/identity", () => ({ authenticatedFetch: vi.fn() }));
+vi.mock("@/lib/profilesApi", async (importOriginal) => ({
+  ...(await importOriginal<typeof ProfilesApiModule>()),
+  useCurrentProfile: () => currentProfileRef.current,
+}));
 vi.mock("@/hooks/useHosts", () => ({
   useHosts: vi.fn(),
   useHostModelOptions: vi.fn(() => ({ data: [] })),
@@ -208,9 +217,7 @@ beforeEach(() => {
   // so a case that never submits can't leak its state into the next test.
   resetLandingDraft();
   searchParams = new URLSearchParams("project=Alpha");
-  // The module-scoped landing draft survives unmounts by design; clear it so
-  // one test's parked draft can't seed the next one.
-  resetLandingDraft();
+  currentProfileRef.current = null;
   localStorage.clear();
   // A recent on the host that the generic seeding would use when the config
   // sets no workspace.
@@ -350,6 +357,25 @@ describe("NewChatLandingScreen project prefill", () => {
       expect(screen.getByTestId("new-chat-landing-agent-select").textContent).toContain("Other"),
     );
     const body = await submitAndReadBody();
+    expect(body.agent_id).toBe("ag_other");
+  });
+
+  it("seeds a plain composer from profile defaults", async () => {
+    searchParams = new URLSearchParams();
+    currentProfileRef.current = {
+      id: "profile_work",
+      name: "Work",
+      is_default: false,
+      config: { host_id: "host_1", workspace: REPO, agent_id: "ag_other" },
+      protection: {},
+      created_at: 1,
+    };
+    renderLanding();
+
+    const body = await submitAndReadBody();
+    expect(body.profile_id).toBe("profile_work");
+    expect(body.host_id).toBe("host_1");
+    expect(body.workspace).toBe(REPO);
     expect(body.agent_id).toBe("ag_other");
   });
 

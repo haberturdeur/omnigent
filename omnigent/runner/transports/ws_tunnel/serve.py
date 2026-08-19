@@ -30,6 +30,10 @@ from omnigent.cli_invocation import cli_invocation
 from omnigent.debug_logging import runner_primary_session_id
 from omnigent.runner.identity import (
     OMNIGENT_INTERNAL_WS_ORIGIN,
+    RUNNER_ISOLATION_HOST_ID_ENV_VAR,
+    RUNNER_ISOLATION_HOST_ID_HEADER,
+    RUNNER_PROTECTION_GENERATION_ENV_VAR,
+    RUNNER_PROTECTION_GENERATION_HEADER,
     RUNNER_SLICE_KEY_ENV_VAR,
     RUNNER_TUNNEL_TOKEN_HEADER,
 )
@@ -77,7 +81,7 @@ _ASGIApp: TypeAlias = ASGIApp
 _INITIAL_RECONNECT_DELAY_S = 0.5
 _MAX_RECONNECT_DELAY_S = 10.0
 _RECONNECT_JITTER_FRACTION = 0.5
-_FATAL_SERVER_CLOSE_CODES = {4001, 4002, 4004, 4500}
+_FATAL_SERVER_CLOSE_CODES = {4001, 4002, 4004, 4005, 4500}
 # Both 401 and 403 are treated as refreshable: the server may return 403
 # (not 401) when a previously-valid token expires while the machine is
 # offline or sleeping. A fresh token from the factory is obtained and the
@@ -759,6 +763,12 @@ async def _serve_tunnel_once(
     )
     if tunnel_token:
         headers[RUNNER_TUNNEL_TOKEN_HEADER] = tunnel_token
+    protection_generation = os.environ.get(RUNNER_PROTECTION_GENERATION_ENV_VAR)
+    if protection_generation is not None:
+        headers[RUNNER_PROTECTION_GENERATION_HEADER] = protection_generation
+    isolation_host_id = os.environ.get(RUNNER_ISOLATION_HOST_ID_ENV_VAR)
+    if isolation_host_id is not None:
+        headers[RUNNER_ISOLATION_HOST_ID_HEADER] = isolation_host_id
     # Verifying SSL context from a real CA bundle for wss:// — a bare default
     # context loads zero roots on uv / python-build-standalone Pythons (no
     # OpenSSL default cert path). Local runners use ws:// and pass ssl=None.

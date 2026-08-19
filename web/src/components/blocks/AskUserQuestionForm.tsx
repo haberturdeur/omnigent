@@ -19,6 +19,8 @@
 //     user types. The radio/checkbox is part of the same group
 //     as the predefined options (single-select mutex; multi-select
 //     independent toggle).
+//   - an optional additional-context field that can accompany a
+//     predefined or custom answer without replacing the selection
 //   - <pre> blocks showing the ``preview`` of any currently-selected
 //     option that has one (single-select: 0 or 1; multi-select:
 //     one per selected option with a preview).
@@ -64,18 +66,25 @@ function answerForQuestion(
   selection: string | string[],
   customSelected: boolean,
   customText: string,
+  additionalContext: string,
 ): string | string[] | null {
   const customValue = customText.trim();
+  const contextValue = additionalContext.trim();
   if (question.multiSelect) {
     const selected = Array.isArray(selection) ? selection : [];
     const all =
       customSelected && customValue ? Array.from(new Set([...selected, customValue])) : selected;
-    return all.length > 0 ? all : null;
+    if (all.length === 0) return null;
+    return contextValue ? [...all, `Additional context: ${contextValue}`] : all;
   }
+  let answer: string | null;
   if (customSelected) {
-    return customValue || null;
+    answer = customValue || null;
+  } else {
+    answer = typeof selection === "string" && selection ? selection : null;
   }
-  return typeof selection === "string" && selection ? selection : null;
+  if (!answer) return null;
+  return contextValue ? `${answer}\n\nAdditional context: ${contextValue}` : answer;
 }
 
 function questionKey(question: ClaudeQuestion): string {
@@ -106,6 +115,11 @@ export function AskUserQuestionForm({ questions, onSubmit, onReject }: AskUserQu
     return initial;
   });
   const [customInputs, setCustomInputs] = useState<Record<string, string>>(() => {
+    const initial: Record<string, string> = {};
+    for (const q of questions) initial[questionKey(q)] = "";
+    return initial;
+  });
+  const [additionalContexts, setAdditionalContexts] = useState<Record<string, string>>(() => {
     const initial: Record<string, string> = {};
     for (const q of questions) initial[questionKey(q)] = "";
     return initial;
@@ -171,6 +185,7 @@ export function AskUserQuestionForm({ questions, onSubmit, onReject }: AskUserQu
         selections[key] ?? "",
         customSelected[key] ?? false,
         customInputs[key] ?? "",
+        additionalContexts[key] ?? "",
       ) !== null
     );
   });
@@ -184,6 +199,7 @@ export function AskUserQuestionForm({ questions, onSubmit, onReject }: AskUserQu
         selections[key] ?? "",
         customSelected[key] ?? false,
         customInputs[key] ?? "",
+        additionalContexts[key] ?? "",
       );
       if (answer === null) return; // unreachable while ``allAnswered`` gates the button
       finalAnswers[key] = answer;
@@ -326,6 +342,20 @@ export function AskUserQuestionForm({ questions, onSubmit, onReject }: AskUserQu
               className="field-sizing-content flex-1 resize-none bg-transparent text-ui placeholder:text-muted-foreground focus:outline-none"
             />
           </label>
+          <textarea
+            rows={1}
+            aria-label="Additional context"
+            placeholder="Add context (optional)"
+            value={additionalContexts[currentKey] ?? ""}
+            onChange={(event) =>
+              setAdditionalContexts((previous) => ({
+                ...previous,
+                [currentKey]: event.target.value,
+              }))
+            }
+            data-testid="ask-user-question-additional-context"
+            className="field-sizing-content mt-1 resize-none rounded border border-border bg-transparent px-2 py-1.5 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+          />
         </div>
         {previewsToShow.length > 0 && (
           <div className="flex flex-col gap-1" data-testid="ask-user-question-previews">

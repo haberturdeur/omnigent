@@ -4,6 +4,7 @@ import android.app.Activity
 import android.os.Looper
 import com.sun.net.httpserver.HttpServer
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -164,6 +165,28 @@ class OidcLoginManagerTest {
         assertTrue(
             "the live flow's browser launch was suppressed",
             launched != null && launched.dataString!!.startsWith(origin),
+        )
+    }
+
+    @Test
+    fun `auth endpoints preserve configured mount path`() {
+        assertEquals(
+            "https://example.test/omnigent/auth/cli-login",
+            serverEndpoint("https://example.test/omnigent", "/auth/cli-login"),
+        )
+    }
+
+    @Test
+    fun `browser target preserves mount without duplicating it`() {
+        val base = "https://example.test/omnigent"
+
+        assertEquals(
+            "https://example.test/omnigent/auth/complete?ticket=one",
+            resolveServerPath(base, "/auth/complete?ticket=one"),
+        )
+        assertEquals(
+            "https://example.test/omnigent/auth/complete?ticket=two",
+            resolveServerPath(base, "/omnigent/auth/complete?ticket=two"),
         )
     }
 

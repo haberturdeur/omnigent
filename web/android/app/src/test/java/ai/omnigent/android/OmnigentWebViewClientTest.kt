@@ -62,19 +62,20 @@ class OmnigentWebViewClientTest {
     }
 
     @Test
-    fun `workspace chrome hide is not gated on the ui mount path`() {
+    fun `workspace chrome hide is gated on the configured mount path`() {
         val webView = RecordingWebView(ApplicationProvider.getApplicationContext())
-        val client = client(shouldInjectBridgeAtPageReady = false)
+        val client =
+            client(
+                shouldInjectBridgeAtPageReady = false,
+                pinnedServerUrl = "$PINNED_ORIGIN/omnigent",
+            )
 
-        // A post-login landing on the pinned server's root and a nested app route
-        // both need the CSS or the workspace switcher stays visible.
+        // The sibling root is skipped; the configured `/omnigent` mount receives
+        // the chrome-hiding script.
         client.onPageFinished(webView, "$PINNED_ORIGIN/")
         client.onPageFinished(webView, "$PINNED_ORIGIN/omnigent/c/abc")
 
-        assertEquals(
-            listOf(WorkspaceChromeScript.source, WorkspaceChromeScript.source),
-            webView.evaluatedScripts,
-        )
+        assertEquals(listOf(WorkspaceChromeScript.source), webView.evaluatedScripts)
     }
 
     @Test
@@ -85,6 +86,66 @@ class OmnigentWebViewClientTest {
         client.onPageFinished(webView, IDP_URL)
 
         assertTrue(webView.evaluatedScripts.isEmpty())
+    }
+
+    @Test
+    fun `same-origin sibling page is neither injected nor declared ready`() {
+        val webView = RecordingWebView(ApplicationProvider.getApplicationContext())
+        var ready = 0
+        val client = client(pinnedServerUrl = "$PINNED_ORIGIN/omnigent") { ready++ }
+
+        client.onPageFinished(webView, "$PINNED_ORIGIN/other")
+
+        assertTrue(webView.evaluatedScripts.isEmpty())
+        assertEquals(0, ready)
+    }
+
+    @Test
+    fun `same-origin lookalike mount is rejected`() {
+        val webView = RecordingWebView(ApplicationProvider.getApplicationContext())
+        val client = client(pinnedServerUrl = "$PINNED_ORIGIN/omnigent")
+
+        val handled =
+            client.shouldOverrideUrlLoading(
+                webView,
+                request("$PINNED_ORIGIN/omnigent-evil/c/session"),
+            )
+
+        assertTrue(handled)
+    }
+
+    @Test
+    fun `failed main frame keeps recovery active through page finished`() {
+        val webView = RecordingWebView(ApplicationProvider.getApplicationContext())
+        var ready = 0
+        var errors = 0
+        val client = client(onMainFrameError = { errors++ }) { ready++ }
+
+        client.onPageStarted(webView, PINNED_URL, null)
+        client.handleMainFrameError(true, PINNED_URL)
+        client.onPageFinished(webView, PINNED_URL)
+
+        assertEquals(1, errors)
+        assertEquals(0, ready)
+
+        client.onPageStarted(webView, PINNED_URL, null)
+        client.onPageFinished(webView, PINNED_URL)
+        assertEquals(1, ready)
+    }
+
+    @Test
+    fun `main frame http failure keeps recovery active through page finished`() {
+        val webView = RecordingWebView(ApplicationProvider.getApplicationContext())
+        var ready = 0
+        var errors = 0
+        val client = client(onMainFrameError = { errors++ }) { ready++ }
+
+        client.onPageStarted(webView, PINNED_URL, null)
+        client.handleMainFrameHttpError(true, PINNED_URL, 503)
+        client.onPageFinished(webView, PINNED_URL)
+
+        assertEquals(1, errors)
+        assertEquals(0, ready)
     }
 
     @Test
@@ -250,7 +311,7 @@ class OmnigentWebViewClientTest {
         val handled = client.shouldOverrideUrlLoading(webView, request("$DATABRICKS_ORIGIN/"))
         idleMainLooper()
 
-        assertFalse(handled)
+        assertTrue(handled)
         assertNull(webView.loadedUrl)
     }
 
@@ -283,7 +344,7 @@ class OmnigentWebViewClientTest {
             ),
         )
         assertFalse(
-            client().shouldOverrideUrlLoading(webView, request("$PINNED_ORIGIN/")),
+            client().shouldOverrideUrlLoading(webView, request("$PINNED_ORIGIN/app/deep")),
         )
         assertNull(webView.loadedUrl)
     }
@@ -294,13 +355,22 @@ class OmnigentWebViewClientTest {
     private fun client(
         shouldInjectBridgeAtPageReady: Boolean = false,
         pinnedOrigin: String = PINNED_ORIGIN,
+        pinnedServerUrl: String =
+            if (pinnedOrigin == DATABRICKS_ORIGIN) {
+                "$pinnedOrigin/omnigent"
+            } else {
+                "$pinnedOrigin/app"
+            },
         onLoginRequired: () -> Unit = {},
+        onMainFrameError: () -> Unit = {},
         onPageReady: (String?) -> Unit = {},
     ) = OmnigentWebViewClient(
         pinnedOrigin = { pinnedOrigin },
+        pinnedServerUrl = { pinnedServerUrl },
         shouldInjectBridgeAtPageReady = { shouldInjectBridgeAtPageReady },
         onPageReady = onPageReady,
         onLoginRequired = onLoginRequired,
+        onMainFrameError = onMainFrameError,
     )
 
     private fun request(

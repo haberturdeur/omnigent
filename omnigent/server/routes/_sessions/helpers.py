@@ -4094,6 +4094,27 @@ def _require_permission_mode_forward(
     return settled if isinstance(settled, str) and settled else mode
 
 
+def _require_codex_approval_mode_forward(
+    session_id: str,
+    mode: str,
+    runner_result: _RunnerForwardResult | None,
+) -> None:
+    """Fail unless a live Codex approval-mode update reached the thread."""
+    if runner_result is None:
+        raise OmnigentError(
+            f"Could not change Codex approval mode to {mode!r}: no live Codex runner is "
+            f"available for session {session_id!r}. Reconnect the session and try again.",
+            code=ErrorCode.RUNNER_UNAVAILABLE,
+        )
+    if not 200 <= runner_result.status_code < 300:
+        raise OmnigentError(
+            f"Could not change Codex approval mode to {mode!r}: runner returned status "
+            f"{runner_result.status_code} for session {session_id!r}. Reconnect the session "
+            "and try again.",
+            code=ErrorCode.RUNNER_UNAVAILABLE,
+        )
+
+
 def _publish_status(
     session_id: str,
     status: str,
@@ -4924,6 +4945,44 @@ class _HostLaunchAttempt:
     error: str | None = None
 
 
+async def _stop_stale_host_launch(
+    *,
+    session_id: str,
+    host_id: str,
+    runner_id: str,
+    launch_generation: int,
+    host_registry: HostRegistry,
+) -> bool:
+    """Stop a runner when profile isolation changed during its launch.
+
+    The tunnel generation gate independently refuses stale reconnects. This
+    post-launch fence also asks the host to terminate the process so a runner
+    carrying an obsolete mask snapshot cannot linger on the host.
+
+    :returns: ``True`` when the launch snapshot is stale, regardless of
+        whether the best-effort stop was acknowledged.
+    """
+    from omnigent.server.profile_protection import profile_protection_generation
+
+    if profile_protection_generation() == launch_generation:
+        return False
+    stopped = await _stop_session_host_runner(
+        session_id,
+        host_id,
+        runner_id,
+        host_registry,
+    )
+    _logger.warning(
+        "Rejected stale runner launch for session %s on host %s "
+        "(protection generation changed from %d; stop acknowledged=%s)",
+        session_id,
+        host_id,
+        launch_generation,
+        stopped,
+    )
+    return True
+
+
 async def _launch_runner_on_host(*args: Any, **kwargs: Any) -> _HostLaunchAttempt:
     """Call-time proxy so a facade patch of this symbol is honored here."""
     from omnigent.server.routes import sessions as _facade
@@ -5071,6 +5130,7 @@ async def _launch_runner_on_host_locked(
     """The launch round-trip proper; runs under the conversation's lock."""
     from omnigent.host.frames import HostLaunchRunnerFrame, encode_host_frame
     from omnigent.runner.identity import token_bound_runner_id
+    from omnigent.server.profile_protection import profile_isolation_snapshot
 
     superseded_runner_id = conv.runner_id
     binding_token = secrets.token_urlsafe(32)
@@ -5101,6 +5161,10 @@ async def _launch_runner_on_host_locked(
             extra={"session_id": conv.id},
         )
         return _HostLaunchAttempt(runner_id=new_runner_id)
+    isolation_generation, isolation_masks = profile_isolation_snapshot(
+        conv.workspace,
+        host_id=conv.host_id or host_conn.host_id,
+    )
     request_id = secrets.token_hex(8)
     launch_future: asyncio.Future[dict[str, str | None]] = (
         asyncio.get_running_loop().create_future()
@@ -5116,6 +5180,9 @@ async def _launch_runner_on_host_locked(
             # same configuration check it does at create-time launch. None
             # (agent not resolvable) skips the host-side check — fail open.
             harness=_resolve_harness(conv),
+            isolation_generation=isolation_generation,
+            isolation_host_id=conv.host_id or host_conn.host_id,
+            isolation_masks=[str(path) for path in isolation_masks],
         )
     )
     try:
@@ -5144,6 +5211,18 @@ async def _launch_runner_on_host_locked(
             runner_id=new_runner_id,
             error_code=result.get("error_code"),
             error=result.get("error"),
+        )
+    if await _stop_stale_host_launch(
+        session_id=conv.id,
+        host_id=conv.host_id or host_conn.host_id,
+        runner_id=new_runner_id,
+        launch_generation=isolation_generation,
+        host_registry=host_registry,
+    ):
+        return _HostLaunchAttempt(
+            runner_id=new_runner_id,
+            error_code="profile_protection_changed",
+            error="Private-profile protection changed while the runner was launching.",
         )
     return _HostLaunchAttempt(runner_id=new_runner_id)
 
@@ -8892,6 +8971,7 @@ def _persist_stored_session_bundle(
             parent_conversation_id=metadata.parent_session_id,
             runner_id=runner_id,
             project_id=metadata.project_id,
+            profile_id=metadata.profile_id,
         )
     except ConversationNotFoundError as exc:
         # Parent was authorized by the caller but vanished (deleted)

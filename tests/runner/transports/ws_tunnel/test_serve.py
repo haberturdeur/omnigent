@@ -21,6 +21,10 @@ from websockets.http11 import Response
 
 from omnigent.runner.identity import (
     OMNIGENT_INTERNAL_WS_ORIGIN,
+    RUNNER_ISOLATION_HOST_ID_ENV_VAR,
+    RUNNER_ISOLATION_HOST_ID_HEADER,
+    RUNNER_PROTECTION_GENERATION_ENV_VAR,
+    RUNNER_PROTECTION_GENERATION_HEADER,
     RUNNER_TUNNEL_TOKEN_HEADER,
 )
 from omnigent.runner.transports.ws_tunnel import serve as serve_module
@@ -235,11 +239,13 @@ async def test_serve_tunnel_resets_backoff_after_successful_connection(
     assert sleeps == [0.5, 1.0, 0.5]
 
 
+@pytest.mark.parametrize("close_code", [4002, 4005])
 @pytest.mark.asyncio
 async def test_serve_tunnel_fails_loud_on_protocol_rejection(
     monkeypatch: pytest.MonkeyPatch,
+    close_code: int,
 ) -> None:
-    """Permanent server close codes are not retried.
+    """Protocol and stale-isolation close codes are not retried.
 
     :param monkeypatch: Pytest monkeypatch fixture.
     :returns: None.
@@ -264,10 +270,10 @@ async def test_serve_tunnel_fails_loud_on_protocol_rejection(
         :param runner_version: Runner version string.
         :param auth_token: Optional bearer token.
         :param tunnel_token: Optional tunnel binding token.
-        :raises _Closed: Always with close code 4002.
+        :raises _Closed: Always with the permanent close code under test.
         """
         del app, tunnel_url, runner_id, runner_version, auth_token, tunnel_token
-        raise _Closed(4002)
+        raise _Closed(close_code)
 
     monkeypatch.setattr(serve_module, "_serve_tunnel_once", _serve_once)
 
@@ -725,6 +731,8 @@ async def test_serve_tunnel_once_sends_bearer_header(
     # No recorded ?o= selector, so no workspace-routing header rides the
     # handshake (keeps the asserted header set exact).
     monkeypatch.setattr("omnigent.cli_auth.load_databricks_org_id", lambda _server_url: None)
+    monkeypatch.setenv(RUNNER_PROTECTION_GENERATION_ENV_VAR, "11")
+    monkeypatch.setenv(RUNNER_ISOLATION_HOST_ID_ENV_VAR, "host-a")
 
     connected: list[int] = []
     await _serve_tunnel_once(
@@ -754,6 +762,8 @@ async def test_serve_tunnel_once_sends_bearer_header(
         "additional_headers": {
             "Origin": OMNIGENT_INTERNAL_WS_ORIGIN,
             "Authorization": "Bearer tok-auth",
+            RUNNER_ISOLATION_HOST_ID_HEADER: "host-a",
+            RUNNER_PROTECTION_GENERATION_HEADER: "11",
             RUNNER_TUNNEL_TOKEN_HEADER: "bind-token",
         },
         "close_timeout": serve_module._RUNNER_TUNNEL_CLOSE_TIMEOUT_S,

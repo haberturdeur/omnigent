@@ -195,6 +195,7 @@ import {
 } from "@/components/ui/select";
 import {
   ConfigRow,
+  DescribedSelect,
   EFFORT_SELECT_NONE,
   EFFORT_UNAVAILABLE_PLACEHOLDER,
   MODEL_SELECT_DEFAULT,
@@ -220,6 +221,7 @@ import {
   isClaudeNativeSession,
 } from "@/lib/claudePermissionMode";
 import { isCodexNativeSession } from "@/lib/codexPlanMode";
+import { CODEX_SESSION_APPROVAL_OPTIONS, type CodexApprovalState } from "@/lib/codexApprovalMode";
 import { getCliServerUrl } from "@/lib/host";
 import { useOmnigentAnalytics } from "@/lib/analyticsEmit";
 import { SessionImage } from "@/components/SessionImage";
@@ -6084,10 +6086,8 @@ const SUBAGENT_ROUTING_DESCRIPTION = "Model routing for subagents this session s
  * In-session run-config modal opened from the composer's gear icon. The
  * live-committing analogue of the new-session ``HarnessConfigModal``: only the
  * knobs switchable mid-session appear — Model (which folds Smart Routing in as
- * an option where a dropdown exists), Effort, and Subagent routing. A session's
- * own Smart Routing is otherwise a create-time choice, and
- * permission/approval/cursor modes are launch-time only (no in-session state to
- * read or write), so they are intentionally absent.
+ * an option where a dropdown exists), Effort, Codex Approval, and Subagent
+ * routing. Other harness permission modes remain launch-time only.
  *
  * Like the new-session modal, changes are drafted locally and only applied on
  * Save (through the store setters ``setModel`` / ``setEffort`` /
@@ -6123,6 +6123,7 @@ function SessionConfigModal({
   const claudePermissionMode = useChatStore((s) => s.claudePermissionMode);
   const costControlModeOverride = useChatStore((s) => s.costControlModeOverride);
   const subagentRoutingOverride = useChatStore((s) => s.subagentRoutingOverride);
+  const codexApprovalMode = useChatStore((s) => s.codexApprovalMode);
   const conversationId = useChatStore((s) => s.conversationId);
   const { llmModel, usesServerModelOptions, modelOptions, pickerSelectedModel, modelLabel } =
     useResolvedComposerModel(modelPickerKind, codexModelOptions);
@@ -6151,6 +6152,8 @@ function SessionConfigModal({
   const [draftEffort, setDraftEffort] = useState<string | null>(selectedEffort);
   const [draftRoutingOn, setDraftRoutingOn] = useState(liveRoutingOn);
   const [draftPermissionMode, setDraftPermissionMode] = useState(claudePermissionMode);
+  const [draftCodexApprovalMode, setDraftCodexApprovalMode] =
+    useState<CodexApprovalState>(codexApprovalMode);
   // The sub-agent row is stored as a PICK, not a pre-seeded draft:
   // `undefined` means "untouched", so the row mirrors the live stored value for
   // as long as the user hasn't chosen anything. A draft seeded once per open
@@ -6166,6 +6169,7 @@ function SessionConfigModal({
     setDraftEffort(selectedEffort);
     setDraftRoutingOn(liveRoutingOn);
     setDraftPermissionMode(claudePermissionMode);
+    setDraftCodexApprovalMode(codexApprovalMode);
     setPickedSubagentRouting(undefined);
     // Nothing pushes a routing-switch change to the client (no SSE event, and
     // the session query never goes stale), so re-read them here — otherwise the
@@ -6175,6 +6179,9 @@ function SessionConfigModal({
     // session changes under an open modal (its drafts describe the old one).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, conversationId]);
+  useEffect(() => {
+    if (open) setDraftCodexApprovalMode(codexApprovalMode);
+  }, [open, codexApprovalMode]);
 
   // The Select value: the router sentinel when routing is drafted on, else the
   // drafted model, else the "Default" sentinel (no override).
@@ -6276,6 +6283,12 @@ function SessionConfigModal({
         // sequence rather than firing concurrently.
         if (showClaudePermissionMode && draftPermissionMode !== claudePermissionMode)
           await store.setClaudePermissionMode(draftPermissionMode);
+        if (
+          modelPickerKind === "codex" &&
+          draftCodexApprovalMode !== "bypass" &&
+          draftCodexApprovalMode !== store.codexApprovalMode
+        )
+          await store.setCodexApprovalMode(draftCodexApprovalMode);
         // Sub-agent routing is independent of this session's own model — a
         // plain PATCH with no slash-command injection, so ordering is free.
         // Only an explicit pick is written, and only when it still differs from
@@ -6419,6 +6432,17 @@ function SessionConfigModal({
                   ))}
                 </SelectContent>
               </Select>
+            </ConfigRow>
+          )}
+          {modelPickerKind === "codex" && (
+            <ConfigRow label="Approval" description="What Codex can do without asking">
+              <DescribedSelect
+                value={draftCodexApprovalMode}
+                onValueChange={(value) => setDraftCodexApprovalMode(value as CodexApprovalState)}
+                options={CODEX_SESSION_APPROVAL_OPTIONS}
+                testId="composer-config-approval"
+                ariaLabel="Approval"
+              />
             </ConfigRow>
           )}
           {/* Sub-agent routing — the only in-session routing control, for a
@@ -6606,8 +6630,8 @@ function ComposerConfigGear({
 
 /**
  * Label/value rows summarizing the session's live run-config, for the gear
- * icon's hover tooltip. Mirrors the new-session summary but with in-session
- * values. The Permissions row lives in the modal itself, not this summary.
+ * icon's hover tooltip. Mirrors the new-session summary with the controls the
+ * running harness can actually change.
  */
 function useSessionConfigSummary({
   harnessLabel,
@@ -6626,6 +6650,7 @@ function useSessionConfigSummary({
 }): { label: string; value: string }[] {
   const selectedEffort = useSessionEffort();
   const costControlModeOverride = useChatStore((s) => s.costControlModeOverride);
+  const codexApprovalMode = useChatStore((s) => s.codexApprovalMode);
   const { modelLabel } = useResolvedComposerModel(modelPickerKind, codexModelOptions);
   const routingOn = costRoutingEligible && costControlModeOverride === "on";
 
@@ -6642,6 +6667,12 @@ function useSessionConfigSummary({
   if (showEffort && !routingOn) {
     const effortValue = formatStatusEffortLabel(selectedEffort, modelPickerKind === "codex");
     rows.push({ label: "Effort", value: effortValue ?? "Default" });
+  }
+  if (modelPickerKind === "codex") {
+    const approvalLabel =
+      CODEX_SESSION_APPROVAL_OPTIONS.find((option) => option.value === codexApprovalMode)?.label ??
+      codexApprovalMode;
+    rows.push({ label: "Approval", value: approvalLabel });
   }
   return rows;
 }

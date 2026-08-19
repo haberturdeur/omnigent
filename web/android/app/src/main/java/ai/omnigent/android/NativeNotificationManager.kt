@@ -14,7 +14,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * Local (foreground) notifications + best-effort badge, mirroring the iOS
  * `NativeNotificationManager`. Tap routing forwards the notification's
  * `navigatePath` back into the SPA: the tap launches [MainActivity] with the
- * path as an intent extra, which the activity replays via
+ * path as an intent extra through [NotificationRouterActivity], which replays it via
  * `window.__omnigentNativeEmitNotificationActivated`.
  *
  * Posting tolerates a missing `POST_NOTIFICATIONS` grant (requested by
@@ -26,9 +26,8 @@ class NativeNotificationManager(
 ) {
     private val manager = NotificationManagerCompat.from(context)
 
-    // Ids at/above BADGE_NOTIFICATION_ID + 1 so per-session toasts never collide
-    // with the reserved badge-summary notification.
-    private val nextId = AtomicInteger(BADGE_NOTIFICATION_ID + 1)
+    // IDs 1 and 2 are reserved for the badge summary and foreground monitor.
+    private val nextId = AtomicInteger(FIRST_TRANSIENT_NOTIFICATION_ID)
 
     // Last badge state from the web layer, kept so a grant of the API 33+
     // notification permission can replay a badge that was computed (and
@@ -51,6 +50,7 @@ class NativeNotificationManager(
                 NotificationManager.IMPORTANCE_HIGH,
             )
         manager.createNotificationChannel(channel)
+        pruneDeliveryState()
     }
 
     fun notify(
@@ -58,6 +58,7 @@ class NativeNotificationManager(
         body: String?,
         navigatePath: String?,
     ) {
+        if (webNotificationsSuppressed()) return
         val id = nextId.getAndIncrement()
         val builder =
             NotificationCompat
@@ -73,6 +74,78 @@ class NativeNotificationManager(
         }
 
         post(id, builder.build())
+    }
+
+    /** Post or replace the background monitor's notification for one session. */
+    fun notify(
+        event: SessionAttentionEvent,
+        serverUrl: String? = null,
+    ) {
+        val session = event.session
+        val exactId = event.notificationId
+        val deliveryKey =
+            exactId?.let { "id:$it" }
+                ?: "fallback:${session.id}:${event.kind.name}"
+        val deliveryWindow = if (exactId == null) DELIVERY_DEDUPE_MS else EXACT_ID_RETENTION_MS
+        val deliveryClaim = claimDelivery(deliveryKey, deliveryWindow) ?: return
+        val body =
+            event.approval?.description
+                ?: context.getString(
+                    when (event.kind) {
+                        SessionAttentionEvent.Kind.NEEDS_INPUT -> R.string.notification_needs_input
+                        SessionAttentionEvent.Kind.COMPLETED -> R.string.notification_completed
+                        SessionAttentionEvent.Kind.FAILED -> R.string.notification_failed
+                    },
+                )
+        val requestCode = (session.id.hashCode() and 0x3fffffff) + FIRST_SESSION_REQUEST_CODE
+        val builder =
+            NotificationCompat
+                .Builder(context, CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_notification)
+                .setContentTitle(session.title ?: context.getString(R.string.notification_session))
+                .setContentText(body)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+                .setContentIntent(
+                    activationIntent(
+                        "/c/${session.id}",
+                        requestCode,
+                        serverUrl = serverUrl,
+                    ),
+                )
+                .setAutoCancel(true)
+                .setOnlyAlertOnce(true)
+                .setDefaults(NotificationCompat.DEFAULT_ALL)
+        event.approval?.let { approval ->
+            builder.addAction(
+                R.drawable.ic_notification,
+                context.getString(R.string.approval_action_approve),
+                approvalIntent(approval, ApprovalActionReceiver.ACTION_APPROVE),
+            )
+            approval.persistent?.let { persistent ->
+                val action =
+                    when (persistent) {
+                        NotificationApproval.PersistentAction.ALLOW_ALL_EDITS ->
+                            ApprovalActionReceiver.ACTION_ALLOW_ALL_EDITS
+                        NotificationApproval.PersistentAction.REMEMBER ->
+                            ApprovalActionReceiver.ACTION_REMEMBER
+                    }
+                builder.addAction(
+                    R.drawable.ic_notification,
+                    context.getString(R.string.approval_action_always),
+                    approvalIntent(approval, action),
+                )
+            }
+            builder.addAction(
+                R.drawable.ic_notification,
+                context.getString(R.string.approval_action_reject),
+                approvalIntent(approval, ApprovalActionReceiver.ACTION_REJECT),
+            )
+        }
+        if (!post(notificationTag(session.id, exactId), EVENT_NOTIFICATION_ID, builder.build())) {
+            releaseDelivery(deliveryKey, deliveryClaim)
+        } else if (exactId != null) {
+            rememberSessionNotification(session.id, exactId)
+        }
     }
 
     /**
@@ -97,6 +170,10 @@ class NativeNotificationManager(
         body: String? = null,
     ) {
         lastBadge = BadgeState(count, navigatePath, title, body)
+        if (webNotificationsSuppressed()) {
+            manager.cancel(BADGE_NOTIFICATION_ID)
+            return
+        }
         if (count <= 0) {
             manager.cancel(BADGE_NOTIFICATION_ID)
             return
@@ -131,6 +208,64 @@ class NativeNotificationManager(
         setBadgeCount(badge.count, badge.navigatePath, badge.title, badge.body)
     }
 
+    internal fun dismissSessionNotification(
+        sessionId: String,
+        notificationId: String?,
+    ) {
+        if (notificationId == null) {
+            sessionNotificationIds(sessionId).forEach { exactId ->
+                manager.cancel(notificationTag(sessionId, exactId), EVENT_NOTIFICATION_ID)
+                rememberDelivery("id:$exactId")
+            }
+            clearSessionNotifications(sessionId)
+            manager.cancel(notificationTag(sessionId, null), EVENT_NOTIFICATION_ID)
+        } else {
+            manager.cancel(notificationTag(sessionId, notificationId), EVENT_NOTIFICATION_ID)
+            forgetSessionNotification(sessionId, notificationId)
+        }
+        notificationId?.let { rememberDelivery("id:$it") }
+        rememberDelivery("fallback:$sessionId:${SessionAttentionEvent.Kind.NEEDS_INPUT.name}")
+    }
+
+    private fun rememberSessionNotification(sessionId: String, notificationId: String) {
+        synchronized(DELIVERY_LOCK) {
+            val prefs = context.getSharedPreferences(DELIVERY_PREFS, Context.MODE_PRIVATE)
+            val ids = prefs.getStringSet("$SESSION_PREFIX$sessionId", emptySet()).orEmpty().toMutableSet()
+            ids.add(notificationId)
+            prefs.edit().putStringSet("$SESSION_PREFIX$sessionId", ids).commit()
+        }
+    }
+
+    private fun sessionNotificationIds(sessionId: String): Set<String> =
+        context
+            .getSharedPreferences(DELIVERY_PREFS, Context.MODE_PRIVATE)
+            .getStringSet("$SESSION_PREFIX$sessionId", emptySet())
+            .orEmpty()
+            .toSet()
+
+    private fun forgetSessionNotification(sessionId: String, notificationId: String) {
+        synchronized(DELIVERY_LOCK) {
+            val prefs = context.getSharedPreferences(DELIVERY_PREFS, Context.MODE_PRIVATE)
+            val ids = prefs.getStringSet("$SESSION_PREFIX$sessionId", emptySet()).orEmpty().toMutableSet()
+            ids.remove(notificationId)
+            val edit = prefs.edit()
+            if (ids.isEmpty()) edit.remove("$SESSION_PREFIX$sessionId")
+            else edit.putStringSet("$SESSION_PREFIX$sessionId", ids)
+            edit.commit()
+        }
+    }
+
+    private fun clearSessionNotifications(sessionId: String) {
+        context
+            .getSharedPreferences(DELIVERY_PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .remove("$SESSION_PREFIX$sessionId")
+            .commit()
+    }
+
+    private fun webNotificationsSuppressed(): Boolean =
+        SessionMonitorStore.appVisible || PushRegistrationManager(context).registered
+
     /**
      * Post a notification, tolerating a missing notification grant. The
      * `POST_NOTIFICATIONS` permission is revocable on API 33+, so `notify` can
@@ -149,17 +284,103 @@ class NativeNotificationManager(
         }
     }
 
+    private fun post(
+        tag: String,
+        id: Int,
+        notification: Notification,
+    ): Boolean {
+        if (!manager.areNotificationsEnabled()) return false
+        return try {
+            manager.notify(tag, id, notification)
+            true
+        } catch (_: SecurityException) {
+            // POST_NOTIFICATIONS not granted — drop; web falls back.
+            false
+        }
+    }
+
+    private fun claimDelivery(
+        key: String,
+        dedupeWindowMs: Long,
+    ): Long? {
+        if (!manager.areNotificationsEnabled()) return null
+        synchronized(DELIVERY_LOCK) {
+            pruneDeliveryStateLocked(System.currentTimeMillis())
+            val prefs = context.getSharedPreferences(DELIVERY_PREFS, Context.MODE_PRIVATE)
+            val now = System.currentTimeMillis()
+            val storedKey = "$DELIVERY_PREFIX$key"
+            val previous = prefs.getLong(storedKey, 0L)
+            if (previous > 0L && now - previous in 0 until dedupeWindowMs) return null
+            prefs.edit().putLong(storedKey, now).commit()
+            return now
+        }
+    }
+
+    private fun rememberDelivery(key: String) {
+        synchronized(DELIVERY_LOCK) {
+            val now = System.currentTimeMillis()
+            context
+                .getSharedPreferences(DELIVERY_PREFS, Context.MODE_PRIVATE)
+                .edit()
+                .putLong("$DELIVERY_PREFIX$key", now)
+                .commit()
+            pruneDeliveryStateLocked(now)
+        }
+    }
+
+    internal fun pruneDeliveryState(now: Long = System.currentTimeMillis()) {
+        synchronized(DELIVERY_LOCK) {
+            pruneDeliveryStateLocked(now)
+        }
+    }
+
+    private fun pruneDeliveryStateLocked(now: Long) {
+        val prefs = context.getSharedPreferences(DELIVERY_PREFS, Context.MODE_PRIVATE)
+        val cutoff = now - EXACT_ID_RETENTION_MS
+        val retainedDeliveryKeys =
+            prefs.all
+                .asSequence()
+                .filter { (key, value) ->
+                    key.startsWith(DELIVERY_PREFIX) && value is Long && value >= cutoff
+                }.sortedByDescending { (_, value) -> value as Long }
+                .take(MAX_DELIVERY_TOMBSTONES)
+                .map { it.key }
+                .toSet()
+        val edit = prefs.edit()
+        prefs.all.keys
+            .filter { it.startsWith(DELIVERY_PREFIX) && it !in retainedDeliveryKeys }
+            .forEach(edit::remove)
+        prefs.all.forEach { (key, value) ->
+            if (!key.startsWith(SESSION_PREFIX) || value !is Set<*>) return@forEach
+            val retainedIds =
+                value.filterIsInstance<String>().filterTo(mutableSetOf()) { notificationId ->
+                    "${DELIVERY_PREFIX}id:$notificationId" in retainedDeliveryKeys
+                }
+            if (retainedIds.isEmpty()) edit.remove(key) else edit.putStringSet(key, retainedIds)
+        }
+        edit.commit()
+    }
+
+    private fun releaseDelivery(key: String, claim: Long) {
+        synchronized(DELIVERY_LOCK) {
+            val prefs = context.getSharedPreferences(DELIVERY_PREFS, Context.MODE_PRIVATE)
+            val storedKey = "$DELIVERY_PREFIX$key"
+            if (prefs.getLong(storedKey, 0L) == claim) prefs.edit().remove(storedKey).commit()
+        }
+    }
+
     // requestCode is the notification's own id, so each notification gets a
     // distinct PendingIntent — otherwise FLAG_UPDATE_CURRENT would let two paths
     // with colliding hashes overwrite each other's extras and mis-route a tap.
     private fun activationIntent(
         navigatePath: String,
         requestCode: Int,
+        serverUrl: String? = null,
     ): PendingIntent {
         val intent =
-            Intent(context, MainActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            Intent(context, NotificationRouterActivity::class.java).apply {
                 putExtra(EXTRA_NAVIGATE_PATH, navigatePath)
+                serverUrl?.let { putExtra(EXTRA_SERVER_URL, it) }
             }
         return PendingIntent.getActivity(
             context,
@@ -169,9 +390,46 @@ class NativeNotificationManager(
         )
     }
 
+    private fun approvalIntent(
+        approval: NotificationApproval,
+        action: String,
+    ): PendingIntent {
+        val intent =
+            Intent(context, ApprovalActionReceiver::class.java).apply {
+                this.action = "ai.omnigent.android.approval.$action"
+                putExtra(ApprovalActionReceiver.EXTRA_INSTANCE, approval.instance)
+                putExtra(ApprovalActionReceiver.EXTRA_SESSION_ID, approval.sessionId)
+                putExtra(ApprovalActionReceiver.EXTRA_ELICITATION_ID, approval.elicitationId)
+                putExtra(ApprovalActionReceiver.EXTRA_ACTION, action)
+            }
+        val requestCode = ("${approval.elicitationId}:$action".hashCode() and 0x3fffffff)
+        return PendingIntent.getBroadcast(
+            context,
+            requestCode,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or
+                PendingIntent.FLAG_IMMUTABLE or
+                PendingIntent.FLAG_ONE_SHOT,
+        )
+    }
+
     companion object {
         const val EXTRA_NAVIGATE_PATH = "ai.omnigent.android.NAVIGATE_PATH"
+        const val EXTRA_SERVER_URL = "ai.omnigent.android.SERVER_URL"
         private const val CHANNEL_ID = "omnigent.sessions"
         private const val BADGE_NOTIFICATION_ID = 1
+        private const val EVENT_NOTIFICATION_ID = 3
+        private const val FIRST_TRANSIENT_NOTIFICATION_ID = 4
+        private const val FIRST_SESSION_REQUEST_CODE = 1_000
+        private const val DELIVERY_PREFS = "ai.omnigent.android.notification_deliveries"
+        private const val DELIVERY_PREFIX = "delivered."
+        private const val SESSION_PREFIX = "session."
+        private const val DELIVERY_DEDUPE_MS = 30_000L
+        private const val EXACT_ID_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000L
+        private const val MAX_DELIVERY_TOMBSTONES = 2_048
+        private val DELIVERY_LOCK = Any()
     }
+
+    private fun notificationTag(sessionId: String, notificationId: String?): String =
+        notificationId?.let { "notification:$it" } ?: "session:$sessionId"
 }

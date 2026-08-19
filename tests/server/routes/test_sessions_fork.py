@@ -145,6 +145,7 @@ class _ConversationStore:
         presentation_labels: dict[str, str] | None = None,
         up_to_response_id: str | None = None,
         project_id: str | None = None,
+        profile_id: str | None = None,
     ) -> Conversation:
         """
         Record the fork call and return a fixed new conversation.
@@ -179,6 +180,7 @@ class _ConversationStore:
         :param project_id: First-class project the fork is filed into
             (route passes the source's project only when the forker
             owns it), or ``None`` for unfiled.
+        :param profile_id: Profile inherited from the source.
         :returns: A new Conversation with a deterministic ID.
         :raises LookupError: If source is not in our map.
         :raises ValueError: If *up_to_response_id* matches no item.
@@ -206,6 +208,7 @@ class _ConversationStore:
                 "presentation_labels": presentation_labels,
                 "up_to_response_id": up_to_response_id,
                 "project_id": project_id,
+                "profile_id": profile_id,
             }
         )
         src = self._convs.get(source_conversation_id)
@@ -238,6 +241,7 @@ class _ConversationStore:
             created_at=100,
             updated_at=100,
             root_conversation_id=fork_id,
+            profile_id=profile_id,
             title=title or f"Fork of {src.title}",
             agent_id=effective_agent_id,
         )

@@ -45,6 +45,8 @@ from omnigent.host.frames import (
     HostListDirResultFrame,
     HostModelOptionsFrame,
     HostModelOptionsResultFrame,
+    HostMoveDirFrame,
+    HostMoveDirResultFrame,
     HostRunnerExitedFrame,
     HostRunnerStatusFrame,
     HostRunnerStatusResultFrame,
@@ -63,14 +65,69 @@ from omnigent.runner.identity import (
     RUNNER_DELEGATED_AUTH_ENV_VAR,
     RUNNER_ID_ENV_VAR,
     RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR,
+    RUNNER_ISOLATION_HOST_ID_ENV_VAR,
+    RUNNER_ISOLATION_MASKS_ENV_VAR,
     RUNNER_LAUNCH_HARNESS_ENV_VAR,
     RUNNER_PARENT_PID_ENV_VAR,
+    RUNNER_PROTECTION_GENERATION_ENV_VAR,
     RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR,
     RUNNER_WORKSPACE_ENV_VAR,
     token_bound_runner_id,
 )
 
 pytestmark = pytest.mark.asyncio
+
+
+async def test_build_runner_env_stamps_isolation_snapshot() -> None:
+    """A remote host passes the server snapshot without reading local state."""
+    env = _build_runner_env(
+        {},
+        server_url="https://omnigent.example",
+        runner_id="runner_snapshot",
+        binding_token="token",
+        workspace="/srv/work",
+        parent_pid=42,
+        host_id="host-a",
+        isolation_generation=9,
+        isolation_host_id="host-a",
+        isolation_masks=["/srv/private-a", "/srv/private-b"],
+    )
+
+    assert env[RUNNER_PROTECTION_GENERATION_ENV_VAR] == "9"
+    assert env[RUNNER_ISOLATION_HOST_ID_ENV_VAR] == "host-a"
+    assert env[RUNNER_ISOLATION_MASKS_ENV_VAR] == '["/srv/private-a","/srv/private-b"]'
+
+
+async def test_build_runner_env_rejects_partial_isolation_snapshot() -> None:
+    """A partial security snapshot cannot silently launch unconfined."""
+    with pytest.raises(ValueError, match="must be provided together"):
+        _build_runner_env(
+            {},
+            server_url="https://omnigent.example",
+            runner_id="runner_snapshot",
+            binding_token="token",
+            workspace="/srv/work",
+            parent_pid=42,
+            host_id="host-a",
+            isolation_generation=9,
+        )
+
+
+async def test_build_runner_env_rejects_snapshot_for_another_host() -> None:
+    """A host cannot launch a snapshot computed for a peer host."""
+    with pytest.raises(ValueError, match="does not match"):
+        _build_runner_env(
+            {},
+            server_url="https://omnigent.example",
+            runner_id="runner_snapshot",
+            binding_token="token",
+            workspace="/srv/work",
+            parent_pid=42,
+            host_id="host-a",
+            isolation_generation=9,
+            isolation_host_id="host-b",
+            isolation_masks=[],
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -360,6 +417,24 @@ def _cleanup_host(host: HostProcess) -> None:
     host._cleanup_runners()
     for task in host._watcher_tasks:
         task.cancel()
+
+
+async def test_handle_launch_rejects_isolation_snapshot_for_peer_host() -> None:
+    """The host refuses a complete snapshot computed for another host."""
+    host = _make_host_process()
+    result = await host._handle_launch(
+        HostLaunchRunnerFrame(
+            request_id="req_wrong_host",
+            binding_token="token",
+            workspace="/srv/work",
+            isolation_generation=1,
+            isolation_host_id="host-peer",
+            isolation_masks=[],
+        )
+    )
+
+    assert result.status == "failed"
+    assert result.error == "runner isolation snapshot targets another host"
 
 
 async def test_handle_launch_spawns_subprocess(
@@ -2555,6 +2630,73 @@ def test_handle_create_dir_creates_directory(tmp_path: Path) -> None:
     assert result.error is None
     assert result.path == str(target)
     assert target.is_dir()
+
+
+def test_handle_move_dir_moves_directory_and_contents(tmp_path: Path) -> None:
+    """A project directory is moved without losing nested content."""
+    host = _make_host_process()
+    source = tmp_path / "source" / "app"
+    destination_root = tmp_path / "private"
+    source.mkdir(parents=True)
+    destination_root.mkdir()
+    (source / "README.md").write_text("kept")
+    destination = destination_root / "app"
+
+    result = host._handle_move_dir(
+        HostMoveDirFrame(
+            request_id="move-1",
+            source_path=str(source),
+            destination_path=str(destination),
+        )
+    )
+
+    assert isinstance(result, HostMoveDirResultFrame)
+    assert result.status == "ok"
+    assert result.error is None
+    assert result.source_path == str(source.resolve())
+    assert result.destination_path == str(destination.resolve())
+    assert not source.exists()
+    assert (destination / "README.md").read_text() == "kept"
+
+
+def test_handle_move_dir_refuses_existing_destination(tmp_path: Path) -> None:
+    """Folder moves never merge with or replace an existing destination."""
+    host = _make_host_process()
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    source.mkdir()
+    destination.mkdir()
+
+    result = host._handle_move_dir(
+        HostMoveDirFrame(
+            request_id="move-2",
+            source_path=str(source),
+            destination_path=str(destination),
+        )
+    )
+
+    assert result.status == "ok"
+    assert result.error == "destination path already exists"
+    assert source.is_dir()
+
+
+def test_handle_move_dir_refuses_destination_below_source(tmp_path: Path) -> None:
+    """A directory cannot be recursively moved into itself."""
+    host = _make_host_process()
+    source = tmp_path / "source"
+    source.mkdir()
+
+    result = host._handle_move_dir(
+        HostMoveDirFrame(
+            request_id="move-3",
+            source_path=str(source),
+            destination_path=str(source / "nested"),
+        )
+    )
+
+    assert result.status == "ok"
+    assert result.error == "destination must not be inside the source directory"
+    assert source.is_dir()
 
 
 def test_handle_create_dir_creates_missing_parents(tmp_path: Path) -> None:

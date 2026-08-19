@@ -66,7 +66,7 @@ from pathlib import Path
 
 from omnigent.harness_startup_config import resolve_harness_path
 from omnigent.inner.agent_env import clean_agent_env, declared_passthrough
-from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
+from omnigent.inner.datamodel import OSEnvSpec
 from omnigent.inner.executor import (
     EnqueuedContent,
     Executor,
@@ -271,9 +271,6 @@ class KimiExecutor(Executor):
         """
         os_env = self._os_env
         if os_env is None:
-            return self._binary_path
-        sandbox_spec = os_env.sandbox or OSEnvSandboxSpec()
-        if sandbox_spec.type == "none":
             return self._binary_path
         try:
             from .sandbox import (

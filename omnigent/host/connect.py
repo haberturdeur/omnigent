@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -69,6 +70,8 @@ from omnigent.host.frames import (
     HostListWorktreesResultFrame,
     HostModelOptionsFrame,
     HostModelOptionsResultFrame,
+    HostMoveDirFrame,
+    HostMoveDirResultFrame,
     HostRemoveWorktreeFrame,
     HostRemoveWorktreeResultFrame,
     HostRunnerExitedFrame,
@@ -123,11 +126,15 @@ from omnigent.runner.identity import (
     RUNNER_DELEGATED_AUTH_ENV_VAR,
     RUNNER_ID_ENV_VAR,
     RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR,
+    RUNNER_ISOLATION_HOST_ID_ENV_VAR,
+    RUNNER_ISOLATION_MASKS_ENV_VAR,
     RUNNER_LAUNCH_HARNESS_ENV_VAR,
     RUNNER_PARENT_PID_ENV_VAR,
+    RUNNER_PROTECTION_GENERATION_ENV_VAR,
     RUNNER_SLICE_KEY_ENV_VAR,
     RUNNER_TUNNEL_BINDING_TOKEN_ENV_VAR,
     RUNNER_WORKSPACE_ENV_VAR,
+    encode_runner_isolation_masks,
     token_bound_runner_id,
 )
 from omnigent.runner.transports.ws_tunnel.frames import (
@@ -709,6 +716,9 @@ def _build_runner_env(
     initial_auth_token: str | None = None,
     host_id: str | None = None,
     harness: str | None = None,
+    isolation_generation: int | None = None,
+    isolation_host_id: str | None = None,
+    isolation_masks: list[str] | None = None,
 ) -> dict[str, str]:
     """
     Build the environment for a spawned runner subprocess.
@@ -738,6 +748,10 @@ def _build_runner_env(
     :param harness: Canonical harness of the launching session, e.g.
         ``"claude-native"``; lets the runner start harness-specific prewarms
         at boot. ``None`` (unknown / older server) omits the stamp.
+    :param isolation_generation: Monotonic protection generation captured
+        with *isolation_masks* by the server.
+    :param isolation_host_id: Host namespace used to compute the masks.
+    :param isolation_masks: Canonical private roots this runner must hide.
     :returns: The runner subprocess environment.
     """
     extra_names = {
@@ -791,6 +805,22 @@ def _build_runner_env(
         env[RUNNER_SLICE_KEY_ENV_VAR] = host_id
     if harness:
         env[RUNNER_LAUNCH_HARNESS_ENV_VAR] = harness
+    snapshot_values = (isolation_generation, isolation_host_id, isolation_masks)
+    if any(value is None for value in snapshot_values) and any(
+        value is not None for value in snapshot_values
+    ):
+        raise ValueError(
+            "runner isolation generation, host id, and masks must be provided together"
+        )
+    if isolation_generation is not None:
+        if isolation_generation < 0:
+            raise ValueError("runner isolation generation must be non-negative")
+        assert isolation_host_id is not None
+        if isolation_host_id != host_id:
+            raise ValueError("runner isolation host id does not match the launching host")
+        env[RUNNER_PROTECTION_GENERATION_ENV_VAR] = str(isolation_generation)
+        env[RUNNER_ISOLATION_HOST_ID_ENV_VAR] = isolation_host_id
+        env[RUNNER_ISOLATION_MASKS_ENV_VAR] = encode_runner_isolation_masks(isolation_masks or [])
     return env
 
 
@@ -1518,6 +1548,29 @@ class HostProcess:
             ``"harness_not_configured"`` when the harness check
             refuses the launch.
         """
+        snapshot_values = (
+            frame.isolation_generation,
+            frame.isolation_host_id,
+            frame.isolation_masks,
+        )
+        if any(value is None for value in snapshot_values) and any(
+            value is not None for value in snapshot_values
+        ):
+            return HostLaunchRunnerResultFrame(
+                request_id=frame.request_id,
+                status="failed",
+                error="runner isolation snapshot is incomplete",
+            )
+        if (
+            frame.isolation_host_id is not None
+            and frame.isolation_host_id != self._identity.host_id
+        ):
+            return HostLaunchRunnerResultFrame(
+                request_id=frame.request_id,
+                status="failed",
+                error="runner isolation snapshot targets another host",
+            )
+
         # Refuse to spawn for a harness this machine can't actually run —
         # otherwise the runner starts, the session looks alive, and the
         # first turn dies confusingly inside the executor. ``None`` (an
@@ -1558,6 +1611,9 @@ class HostProcess:
             initial_auth_token=initial_auth_token,
             host_id=self._identity.host_id,
             harness=frame.harness,
+            isolation_generation=frame.isolation_generation,
+            isolation_host_id=frame.isolation_host_id,
+            isolation_masks=frame.isolation_masks,
         )
         # The runner serves one primary session (plus any co-located subagents);
         # pass it so runner-level log records can be attributed to that session.
@@ -2363,6 +2419,76 @@ class HostProcess:
             path=created,
         )
 
+    def _handle_move_dir(self, frame: HostMoveDirFrame) -> HostMoveDirResultFrame:
+        """Move one real directory to a new, non-existing absolute path."""
+        try:
+            source_input = os.path.abspath(os.path.expanduser(frame.source_path))
+            destination_input = os.path.abspath(os.path.expanduser(frame.destination_path))
+        except (TypeError, ValueError) as exc:
+            return HostMoveDirResultFrame(
+                request_id=frame.request_id,
+                status="failed",
+                error=f"path expansion failed: {exc}",
+            )
+        if os.path.islink(source_input):
+            return HostMoveDirResultFrame(
+                request_id=frame.request_id,
+                status="ok",
+                error="source directory must not be a symbolic link",
+            )
+        source = os.path.realpath(source_input)
+        destination_parent = os.path.realpath(os.path.dirname(destination_input))
+        destination = os.path.join(destination_parent, os.path.basename(destination_input))
+        if not os.path.isdir(source):
+            return HostMoveDirResultFrame(
+                request_id=frame.request_id,
+                status="ok",
+                error="source directory does not exist",
+            )
+        if not os.path.isdir(destination_parent):
+            return HostMoveDirResultFrame(
+                request_id=frame.request_id,
+                status="ok",
+                error="destination parent directory does not exist",
+            )
+        if os.path.lexists(destination):
+            return HostMoveDirResultFrame(
+                request_id=frame.request_id,
+                status="ok",
+                error="destination path already exists",
+            )
+        try:
+            if os.path.commonpath((source, destination)) == source:
+                return HostMoveDirResultFrame(
+                    request_id=frame.request_id,
+                    status="ok",
+                    error="destination must not be inside the source directory",
+                )
+        except ValueError:
+            pass
+        try:
+            moved = shutil.move(source, destination)
+            canonical_destination = os.path.realpath(moved)
+        except PermissionError:
+            return HostMoveDirResultFrame(
+                request_id=frame.request_id,
+                status="ok",
+                error="permission denied",
+            )
+        except OSError as exc:
+            return HostMoveDirResultFrame(
+                request_id=frame.request_id,
+                status="failed",
+                error=f"directory move failed: {exc.strerror or str(exc)}",
+            )
+        _logger.info("Moved directory %s to %s", source, canonical_destination)
+        return HostMoveDirResultFrame(
+            request_id=frame.request_id,
+            status="ok",
+            source_path=source,
+            destination_path=canonical_destination,
+        )
+
     def _handle_install_harness(
         self, frame: HostInstallHarnessFrame
     ) -> HostInstallHarnessResultFrame:
@@ -2813,6 +2939,8 @@ class HostProcess:
                 after=cast("str | None", params.get("after")),
                 before=cast("str | None", params.get("before")),
                 order=str(params.get("order", "desc")),
+                max_bytes=(_coerce_int(params["max_bytes"]) if "max_bytes" in params else None),
+                download=params.get("download") is True,
             )
         if op == "changes":
             return r.changes(session_id)
@@ -3563,6 +3691,7 @@ class HostProcess:
             gateway_inference=self._gateway_inference,
             telemetry_opt_out=_tel_opt_out,
             installation_id=_tel_install_id,
+            capabilities=["create_dir", "move_dir", "private_root_isolation"],
         )
         try:
             encoded_hello = encode_host_frame(hello)
@@ -3798,6 +3927,9 @@ class HostProcess:
             await ws.send(encode_host_frame(self._handle_list_dir(frame)))
         elif isinstance(frame, HostCreateDirFrame):
             await ws.send(encode_host_frame(self._handle_create_dir(frame)))
+        elif isinstance(frame, HostMoveDirFrame):
+            move_result = await asyncio.to_thread(self._handle_move_dir, frame)
+            await ws.send(encode_host_frame(move_result))
         elif isinstance(frame, HostInstallHarnessFrame):
             # The installer shells out (npm) and can run for minutes, so run
             # it off the event loop and reply when it completes.

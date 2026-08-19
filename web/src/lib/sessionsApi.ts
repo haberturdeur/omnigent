@@ -808,6 +808,7 @@ export async function updateSession(
      * promise means the mode really changed.
      */
     claudePermissionMode?: string;
+    codexApprovalMode?: "default" | "read-only" | "full-access";
     costControlModeOverride?: "on" | "off" | null;
     subagentRoutingOverride?: "on" | "off" | null;
     runnerId?: string;
@@ -827,6 +828,9 @@ export async function updateSession(
   }
   if (updates.claudePermissionMode !== undefined) {
     body.permission_mode = updates.claudePermissionMode;
+  }
+  if (updates.codexApprovalMode !== undefined) {
+    body.codex_approval_mode = updates.codexApprovalMode;
   }
   if ("costControlModeOverride" in updates) {
     body.cost_control_mode_override = updates.costControlModeOverride ?? null;

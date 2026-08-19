@@ -67,7 +67,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { fileContentToBlob, triggerBrowserDownload, useFileContent } from "@/hooks/useFileContent";
+import { downloadWorkspaceFile, useFileContent } from "@/hooks/useFileContent";
 import { useFileDiff } from "@/hooks/useFileDiff";
 import {
   type Comment,
@@ -490,10 +490,10 @@ function FileViewerBody({
   );
 
   const downloadFile = useCallback(() => {
-    const data = fileQuery.data;
-    if (!data) return;
-    triggerBrowserDownload(fileContentToBlob(data), path.split("/").pop() ?? path);
-  }, [fileQuery.data, path]);
+    void downloadWorkspaceFile(conversationId, path).catch((error: unknown) => {
+      console.warn("Download failed", error);
+    });
+  }, [conversationId, path]);
 
   // Pop the HTML artifact into its own browser tab. The artifact is rendered in
   // a sandboxed, opaque-origin iframe (see `openHtmlArtifactInNewTab`), so it
@@ -996,9 +996,7 @@ function FileViewerBody({
     settingsMenu.push({
       key: "download",
       label: "Download file",
-      tooltip: fileQuery.data.truncated
-        ? "Download (file was truncated — content may be incomplete)"
-        : "Download",
+      tooltip: "Download",
       icon: <DownloadIcon className="size-4" />,
       active: false,
       onSelect: downloadFile,

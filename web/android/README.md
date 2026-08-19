@@ -7,13 +7,12 @@ shipping a duplicate copy of the SPA. It is a native _shell_, not a rewrite.
 ## Development
 
 Open `web/android` in Android Studio Meerkat (AGP 9.1+) and run the `app`
-configuration on an API 36 emulator. Requires JDK 17 and the Android SDK
+configuration on an API 36 emulator. Requires JDK 17+ and the Android SDK
 (`compileSdk 36`, `targetSdk 36`, `minSdk 28`).
 
-Debug builds permit cleartext (`http://`) to localhost and private-range hosts
-via `res/xml/network_security_config.xml` for local development; release builds
-keep the platform default (HTTPS only), mirroring the iOS
-`NSAllowsArbitraryLoadsInWebContent` debug-only posture.
+Every build requires HTTPS, including debug and locally installed APKs. The app
+rejects cleartext server URLs and Android's network-security policy blocks
+cleartext traffic as a second layer of enforcement.
 
 ## How it relates to the web bundle
 
@@ -33,8 +32,9 @@ agent-HTML iframe, so an injected artifact can't reach the native surface.
 ## Scope (first version)
 
 Provides native setup chrome (server entry + recent servers via
-`ConnectActivity`), `WebView` loading, foreground local notifications with tap
-routing back into the SPA, a best-effort app badge, edge-to-edge inset plumbing
+`ConnectActivity`), `WebView` loading, local notifications with tap routing back
+into the SPA, UnifiedPush/Web Push background delivery, an opt-in polling
+fallback, a best-effort app badge, edge-to-edge inset plumbing
 (measured insets injected as `--omnigent-android-safe-area-*`, consumed by the
 web inset system), correct system-back / predictive-back handling, file
 downloads — including `blob:` / `data:` exports via a fetch→base64→MediaStore
@@ -42,6 +42,53 @@ bridge, which closes omnigent-ai/omnigent#969 (the iOS shell drops these) —
 file **uploads** (`<input type=file>` via `WebChromeClient.onShowFileChooser`),
 and **microphone** capture for voice input (`onPermissionRequest`, granted to
 the pinned origin only, with a runtime `RECORD_AUDIO` request).
+
+### FOSS background notifications
+
+The primary transport is [UnifiedPush](https://unifiedpush.org/), using its
+Apache-licensed Android connector and standard encrypted Web Push. Choose
+**Enable UnifiedPush** in the server menu; Android hands registration to the
+installed distributor selected by the user. FOSS distributors include ntfy and
+NextPush, and the Omnigent server sends directly to the resulting endpoint—no
+Firebase SDK, Google Play Services, or Omnigent-hosted notification relay is
+required. The endpoint is tied to the authenticated Omnigent account and only
+receives session attention events the account may access.
+Registrations are isolated per configured Omnigent server; tapping a
+notification switches back to its source server before opening the session.
+Binary approval notifications expose **Approve**, the applicable **Always
+allow** option, and **Reject** actions. The encrypted push carries opaque
+identifiers, action capability flags, a capped session title, and a capped
+approval description so the notification can identify the requested command.
+The distributor sees Web Push ciphertext, but Android may show the title and
+description on the lock screen. Structured approvals must be reviewed inside
+the app.
+
+Web Push endpoints must resolve exclusively to public IP addresses to prevent
+notification delivery from reaching internal services. Self-hosted private
+push endpoints require the explicit server setting
+`OMNIGENT_WEBPUSH_ALLOW_PRIVATE_ENDPOINTS=true`; use it only for a trusted
+endpoint on your private network.
+
+For devices without a UnifiedPush distributor, **Enable Polling Fallback** starts
+a native foreground service that checks `GET /v1/sessions` every 10 seconds with
+the WebView's authenticated cookie. Android displays a persistent low-priority
+monitor notification so its battery/network cost stays visible. **Stop** on that
+notification or **Disable Polling Fallback** turns it off. Once the Omnigent
+server accepts the UnifiedPush subscription, the app disables the fallback;
+a failed attempt leaves the working fallback untouched. Enabling the fallback
+manually disables UnifiedPush so both transports cannot notify for one event.
+When UnifiedPush has a valid endpoint, the web-to-native notification bridge
+also suppresses its duplicate event toast and badge-summary notification;
+UnifiedPush becomes the single background notification owner. The server
+assigns a stable ID to each UnifiedPush notification. Android keeps successfully
+displayed IDs for seven days, ignores repeat delivery, and removes an approval
+notification on every registered device when that approval is resolved. Polling
+and legacy payloads do not carry an exact event ID, so they retain a 30-second
+session/event fallback guard; a resolution also marks that fallback briefly to
+prevent stale polling data from restoring the notification.
+
+Both paths work in direct APK and F-Droid-style distributions without Google
+Play Services or proprietary client libraries.
 
 ### Deliberately deferred to the web in-page fallbacks
 
@@ -52,8 +99,8 @@ when the bridge methods are absent, so the Android shell omits them for now:
   system back gesture owns both screen edges, and
   `View.setSystemGestureExclusionRects()` does not apply to it. The sidebar
   opens from the in-page hamburger, exactly as in a browser tab.
-- **Native floating server switcher** and **Chat/Terminal bar.** Rendered
-  in-page by the SPA.
+- **Native Chat/Terminal bar.** Rendered in-page by the SPA. The native floating
+  server switcher remains available as recovery chrome above the WebView.
 
 ## Databricks workspaces
 
@@ -147,9 +194,8 @@ verbatim via Managed App Configuration.
 
 - **App badge count.** Android has no universal numeric badge API. We set
   `NotificationCompat.setNumber()` (shown by some launchers; AOSP/Pixel shows
-  only a dot) and treat the notification dot as the guaranteed surface.
-  `setBadgeCount(0)` is a no-op — we do not cancel notifications to clear a
-  badge.
+  only a dot) and treat the notification dot as the guaranteed surface. A zero
+  count cancels the badge-summary notification.
 
 ## Distribution
 
@@ -220,7 +266,7 @@ The publish tasks are inert when no credentials file is present, so ordinary
 builds are unaffected. Change the target track via `track.set(...)` in
 `app/build.gradle.kts` (`internal` → `alpha` → `beta` → `production`).
 
-> Status: builds clean — `gradlew :app:assembleDebug :app:lintDebug` produces a
-> debug APK with 0 lint errors (JDK 17, Gradle 9.3 wrapper, `compileSdk 36`).
-> Implementation for omnigent-ai/omnigent#1604; not yet exercised on a device
-> (no runtime/instrumented testing here), so treat device behavior as unverified.
+> Status: `gradlew :app:testDebugUnitTest :app:assembleDebug :app:lintDebug`
+> passes on JDK 21 with the Gradle 9.3 wrapper and `compileSdk 36`. The debug APK
+> has also been installed on API 34, connected through `adb reverse` to a live
+> Omnigent server, and exercised with the polling foreground service.

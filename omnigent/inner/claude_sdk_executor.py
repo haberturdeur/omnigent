@@ -1240,14 +1240,13 @@ def prepare_claude_cli_path(
     if real_cli_path is None or spec is None or spec.type != "caller_process":
         return PreparedClaudeCli(cli_path=real_cli_path, enable_native_tools=False)
 
-    if _sandbox_disabled_by_env():
+    cwd = _resolve_sandbox_cwd(spec.cwd)
+    from .sandbox import profile_masks_require_sandbox
+
+    protected_floor = profile_masks_require_sandbox(cwd)
+    if _sandbox_disabled_by_env() and not protected_floor:
         return PreparedClaudeCli(cli_path=real_cli_path, enable_native_tools=False)
 
-    sandbox_spec = spec.sandbox or OSEnvSandboxSpec()
-    if sandbox_spec.type == "none":
-        return PreparedClaudeCli(cli_path=real_cli_path, enable_native_tools=True)
-
-    cwd = _resolve_sandbox_cwd(spec.cwd)
     try:
         sandbox = resolve_sandbox(spec, cwd)
     except (OSError, NotImplementedError) as exc:

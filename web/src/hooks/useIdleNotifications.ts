@@ -45,6 +45,7 @@ import {
 } from "@/lib/browserNotifications";
 import {
   type BadgeActivation,
+  dismissNativeSessionNotifications,
   isNativeShell,
   onNativeNotificationActivated,
   onOpenPath,
@@ -61,9 +62,12 @@ import {
 } from "@/lib/idleTransitions";
 import { isConversationUnseen, useUnseenTick } from "@/hooks/useUnseenConversations";
 import { conversationDisplayLabel } from "@/shell/sidebarNav";
+import { getActiveProfile, useCurrentProfile, type Profile } from "@/lib/profilesApi";
+import { onClearProfileNotificationActivity } from "@/lib/profileNotificationActivity";
 
 const IDLE_BODY = "Agent finished and is ready for your input.";
 const ELICITATION_BODY = "Agent is asking for your input.";
+type NotificationContentPolicy = "full" | "generic" | "disabled";
 
 // How long a session must stay idle after a turn ends before it's treated as
 // "actually done" and notified — long enough that an imminent next step (the
@@ -122,6 +126,7 @@ function isWindowFocused(): boolean {
 export function useIdleNotifications(activeConversationId?: string): void {
   const navigate = useNavigate();
   const { data } = useConversations("", true);
+  const activeProfile = useCurrentProfile();
   const prevStatus = useRef<Map<string, ConversationStatus>>(new Map());
   const prevElicitations = useRef<Map<string, number>>(new Map());
   // Last badge state sent to the shell, as a `count|navigatePath|title|body` key.
@@ -143,6 +148,9 @@ export function useIdleNotifications(activeConversationId?: string): void {
   // `idle` edge schedules one; the session resuming (`running` again) clears it
   // before it fires, so only a settled idle — the real end — notifies.
   const idleNotifyTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  const notificationPolicyKey = `${activeProfile?.id ?? ""}|${activeProfile?.protection?.lock ?? ""}|${activeProfile?.protection?.notification_content ?? ""}`;
+  const timerPolicyKey = useRef(notificationPolicyKey);
+  const notificationGeneration = useRef(0);
   // Sessions we've already beeped a turn-end for and the user hasn't viewed
   // since. A session that finishes again while its notification is still
   // outstanding must NOT beep again — "sound only when a new banner appears,
@@ -163,6 +171,8 @@ export function useIdleNotifications(activeConversationId?: string): void {
   // listener below without re-subscribing whenever the router identity changes.
   const navigateRef = useRef(navigate);
   navigateRef.current = navigate;
+  const activeProfileRef = useRef(activeProfile);
+  activeProfileRef.current = activeProfile;
 
   // Window focus, tracked from the authoritative DOM focus/blur events (and any
   // pointer/key interaction, which implies our window has focus) instead of a
@@ -200,12 +210,46 @@ export function useIdleNotifications(activeConversationId?: string): void {
     };
   }, []);
 
+  const clearPendingNotifications = (profileId?: string) => {
+    notificationGeneration.current += 1;
+    const timers = idleNotifyTimers.current;
+    for (const timer of timers.values()) clearTimeout(timer);
+    timers.clear();
+    lastSentBadge.current = "0|||";
+    void setBadgeCount(0);
+    for (const conversation of latestConversations.current ?? []) {
+      if (profileId && conversation.profile_id !== profileId) continue;
+      dismissNativeSessionNotifications(conversation.id);
+    }
+  };
+
+  // Profile switches and protection-policy changes invalidate queued work and
+  // withdraw content that may no longer be safe to display.
+  useEffect(() => {
+    if (timerPolicyKey.current === notificationPolicyKey) return;
+    const previousProfileId = timerPolicyKey.current.split("|", 1)[0] || undefined;
+    timerPolicyKey.current = notificationPolicyKey;
+    clearPendingNotifications(previousProfileId);
+  }, [notificationPolicyKey]);
+
+  useEffect(
+    () =>
+      onClearProfileNotificationActivity(({ profileId }) => {
+        clearPendingNotifications(profileId);
+      }),
+    [],
+  );
+
   // Send the badge count (with an Android tap target + descriptive text) when
   // it differs from the last one sent. No-op in a plain browser (`setBadgeCount`
   // is inert outside a native shell).
-  const pushBadge = (ids: Set<string>, conversations: Conversation[]) => {
+  const pushBadge = (
+    ids: Set<string>,
+    conversations: Conversation[],
+    profile: Profile | null = activeProfileRef.current,
+  ) => {
     const count = ids.size;
-    const activation = badgeActivationFor(ids, conversations);
+    const activation = badgeActivationFor(ids, conversations, profile);
     const key = `${count}|${activation?.navigatePath ?? ""}|${activation?.title ?? ""}|${activation?.body ?? ""}`;
     if (key === lastSentBadge.current) return;
     lastSentBadge.current = key;
@@ -226,6 +270,7 @@ export function useIdleNotifications(activeConversationId?: string): void {
       const convs = latestConversations.current;
       if (convs === null) return;
       const next = computeUnreadBadgeIds(convs, activeIdRef.current, true, isConversationUnseen);
+      suppressDisabledNotificationIds(next, convs, activeProfileRef.current);
       pushBadge(next, convs);
     };
     const onBlur = () => {
@@ -263,6 +308,7 @@ export function useIdleNotifications(activeConversationId?: string): void {
       windowFocusedRef.current,
       isConversationUnseen,
     );
+    suppressDisabledNotificationIds(next, convs, activeProfileRef.current);
     pushBadge(next, convs);
     // pushBadge and the focus state are refs; rerun only when the map changes.
   }, [unseenTick]);
@@ -283,7 +329,8 @@ export function useIdleNotifications(activeConversationId?: string): void {
       windowFocusedRef.current,
       isConversationUnseen,
     );
-    pushBadge(unread, conversations);
+    suppressDisabledNotificationIds(unread, conversations, activeProfile);
+    pushBadge(unread, conversations, activeProfile);
 
     if (conversations.length === 0) return;
 
@@ -341,6 +388,9 @@ export function useIdleNotifications(activeConversationId?: string): void {
         // the resume loop above cancels). Re-arm if one was already pending.
         const existing = timers.get(id);
         if (existing !== undefined) clearTimeout(existing);
+        const policy = notificationContentPolicy(conversation, activeProfile);
+        if (policy === "disabled") continue;
+        const generation = notificationGeneration.current;
         timers.set(
           id,
           setTimeout(() => {
@@ -350,9 +400,15 @@ export function useIdleNotifications(activeConversationId?: string): void {
             if (windowFocusedRef.current && id === activeIdRef.current) return;
             // Mark it beeped so a later finish stays silent until the user has
             // viewed this session.
+            if (generation !== notificationGeneration.current) return;
             notifiedSessions.current.add(id);
-            // Agent's final words as the body when fetchable, else IDLE_BODY.
-            notifyWithPreview(conversation, navigateRef.current);
+            notifyWithPreview(
+              conversation,
+              navigateRef.current,
+              () => notificationContentPolicy(conversation, activeProfileRef.current),
+              generation,
+              notificationGeneration,
+            );
           }, IDLE_SETTLE_MS),
         );
       }
@@ -361,6 +417,8 @@ export function useIdleNotifications(activeConversationId?: string): void {
         // Same offline-runner guard: a prompt on a dead-runner session can't be
         // acted on and is almost always stale reconciliation.
         if (conversation.runner_online === false) continue;
+        const policy = notificationContentPolicy(conversation, activeProfile);
+        if (policy === "disabled") continue;
         // "Needs response" is surfaced immediately. Drop any deferred turn-end
         // cue for this session — it's awaiting input, not quietly finishing.
         const pending = timers.get(conversation.id);
@@ -368,10 +426,10 @@ export function useIdleNotifications(activeConversationId?: string): void {
           clearTimeout(pending);
           timers.delete(conversation.id);
         }
-        notify(conversation, ELICITATION_BODY, navigate);
+        notify(conversation, ELICITATION_BODY, navigate, policy);
       }
     }
-  }, [data, navigate, activeConversationId]);
+  }, [activeProfile, data, navigate, activeConversationId]);
 }
 
 /**
@@ -391,11 +449,15 @@ export function useIdleNotifications(activeConversationId?: string): void {
 function badgeActivationFor(
   ids: Set<string>,
   conversations: Conversation[],
+  activeProfile: Profile | null = getActiveProfile(),
 ): BadgeActivation | undefined {
   if (ids.size === 0) return undefined;
   if (ids.size === 1) {
     const [id] = ids;
     const conversation = conversations.find((c) => c.id === id);
+    if (conversation && notificationContentPolicy(conversation, activeProfile) === "generic") {
+      return { navigatePath: `/c/${id}`, body: "A private session needs your attention" };
+    }
     const label = conversation ? conversationDisplayLabel(conversation) : "A session";
     return { navigatePath: `/c/${id}`, body: `${label} needs your attention` };
   }
@@ -414,16 +476,46 @@ function badgeActivationFor(
   };
 }
 
+function notificationContentPolicy(
+  conversation: Conversation,
+  activeProfile: Profile | null = getActiveProfile(),
+): NotificationContentPolicy {
+  const isProtected =
+    typeof conversation.profile_id === "string" &&
+    conversation.profile_id === activeProfile?.id &&
+    Boolean(activeProfile.protection?.lock);
+  if (!isProtected) return "full";
+  return activeProfile?.protection?.notification_content === "disabled" ? "disabled" : "generic";
+}
+
+function suppressDisabledNotificationIds(
+  ids: Set<string>,
+  conversations: Conversation[],
+  activeProfile: Profile | null,
+): void {
+  for (const conversation of conversations) {
+    if (
+      ids.has(conversation.id) &&
+      notificationContentPolicy(conversation, activeProfile) === "disabled"
+    ) {
+      ids.delete(conversation.id);
+    }
+  }
+}
+
 /** Show one notification for a session transition; click opens the chat. */
 function notify(
   conversation: Conversation,
   body: string,
   navigate: ReturnType<typeof useNavigate>,
+  policy: NotificationContentPolicy = "full",
 ): void {
+  if (policy === "disabled") return;
+  const privateContent = policy === "generic";
   const path = `/c/${conversation.id}`;
   showNotification({
-    title: conversationDisplayLabel(conversation),
-    body,
+    title: privateContent ? "Private Omnigent session" : conversationDisplayLabel(conversation),
+    body: privateContent ? "Open Omnigent to view this notification." : body,
     // Tag by id so a later update for the same session replaces its
     // toast instead of stacking duplicates.
     tag: `omnigent:session:${conversation.id}`,
@@ -445,8 +537,17 @@ function notify(
 function notifyWithPreview(
   conversation: Conversation,
   navigate: ReturnType<typeof useNavigate>,
+  currentPolicy: () => NotificationContentPolicy,
+  generation: number,
+  generationRef: { current: number },
 ): void {
+  const policy = currentPolicy();
+  if (policy !== "full") {
+    notify(conversation, IDLE_BODY, navigate, policy);
+    return;
+  }
   void fetchLastAssistantText(conversation.id).then((preview) => {
-    notify(conversation, preview ?? IDLE_BODY, navigate);
+    if (generation !== generationRef.current) return;
+    notify(conversation, preview ?? IDLE_BODY, navigate, currentPolicy());
   });
 }

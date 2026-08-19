@@ -6501,6 +6501,9 @@ _dead_letter_dir: ContextVar[Path | None] = ContextVar("_codex_dead_letter_dir",
 
 # Durable event types worth dead-lettering (not ephemeral deltas).
 _DEAD_LETTER_EVENT_TYPES = frozenset({"external_conversation_item", "external_session_usage"})
+# Private-profile authorization failures are concealed as 404. A forwarder
+# restarting for the same live session can safely retry those durable records.
+_DEAD_LETTER_REPLAY_STATUS_CODES = _POST_RETRY_STATUS_CODES | {404}
 
 
 def _reset_forward_health() -> None:
@@ -6603,7 +6606,7 @@ async def _replay_dead_letters_on_startup(
         await replay_dead_letters(
             bridge_dir,
             repost=_repost,
-            retryable_status_codes=_POST_RETRY_STATUS_CODES,
+            retryable_status_codes=_DEAD_LETTER_REPLAY_STATUS_CODES,
             logger_name=__name__,
             max_records=_REPLAY_MAX_RECORDS,
             deadline_seconds=_REPLAY_DEADLINE_SECONDS,

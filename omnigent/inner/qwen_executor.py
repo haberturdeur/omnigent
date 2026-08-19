@@ -34,7 +34,7 @@ from typing import Any, Protocol, TypeAlias
 
 from omnigent.inner._acp_omnigent_mcp import OmnigentAcpMcp
 from omnigent.inner.agent_env import clean_agent_env, declared_passthrough
-from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
+from omnigent.inner.datamodel import OSEnvSpec
 from omnigent.inner.executor import (
     Executor,
     ExecutorConfig,
@@ -373,9 +373,6 @@ class QwenExecutor(Executor):
         """
         os_env = self._os_env
         if os_env is None:
-            return self._qwen_path
-        sandbox_spec = os_env.sandbox or OSEnvSandboxSpec()
-        if sandbox_spec.type == "none":
             return self._qwen_path
         try:
             from .sandbox import (

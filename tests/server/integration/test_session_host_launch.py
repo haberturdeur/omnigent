@@ -93,7 +93,12 @@ def _runner_hello() -> HelloFrame:
 
 
 @pytest.fixture()
-def app(runtime_init: None, db_uri: str, tmp_path) -> FastAPI:
+def app(
+    runtime_init: None,
+    db_uri: str,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> FastAPI:
     """FastAPI app wired WITH ``host_store`` so the inline host-launch
     branch of ``POST /v1/sessions`` is active.
 
@@ -107,6 +112,9 @@ def app(runtime_init: None, db_uri: str, tmp_path) -> FastAPI:
     :param tmp_path: Pytest temp dir for artifacts and cache.
     :returns: A configured FastAPI app with host routes mounted.
     """
+    monkeypatch.setenv(
+        "OMNIGENT_PROFILE_PROTECTION_PATH", str(tmp_path / "profile-protection.json")
+    )
     artifact_store = LocalArtifactStore(str(tmp_path / "artifacts"))
     return create_app(
         agent_store=SqlAlchemyAgentStore(db_uri),
@@ -150,6 +158,8 @@ async def _connect_host(app: FastAPI) -> ApplicationCommunicator:
         is the same instance the session-create launch path reads).
     :returns: The connected ASGI communicator, ready to exchange frames.
     """
+    registry = app.state.host_registry
+    previous = registry.get(_HOST_ID)
     path = f"/v1/hosts/{_HOST_ID}/tunnel"
     comm = ApplicationCommunicator(app, _websocket_scope(path))
     await comm.send_input({"type": "websocket.connect"})
@@ -160,8 +170,7 @@ async def _connect_host(app: FastAPI) -> ApplicationCommunicator:
         HostHelloFrame(version="0.1.0-test", frame_protocol_version=1, name="laptop")
     )
     await comm.send_input({"type": "websocket.receive", "text": hello})
-    registry = app.state.host_registry
-    while registry.get(_HOST_ID) is None:
+    while (current := registry.get(_HOST_ID)) is None or current is previous:
         await asyncio.sleep(0.01)
     return comm
 
@@ -421,7 +430,7 @@ async def test_inline_launch_binds_runner_and_returns_host(
         "/v1/sessions",
         json={"agent_id": agent["id"], "host_id": _HOST_ID, "workspace": _WORKSPACE},
     )
-    await responder
+    launch_frame = await responder
 
     assert resp.status_code == 201, f"expected 201, got {resp.status_code}: {resp.text}"
     body = resp.json()
@@ -436,6 +445,9 @@ async def test_inline_launch_binds_runner_and_returns_host(
     )
     # Canonical workspace from host.stat is what gets stored/returned.
     assert body["workspace"] == _WORKSPACE
+    assert launch_frame.isolation_generation == 0
+    assert launch_frame.isolation_host_id == _HOST_ID
+    assert launch_frame.isolation_masks == []
 
     # The conversation row must reflect the same binding, proving the
     # atomic set_runner_id + host_id/workspace writes persisted.
@@ -985,6 +997,9 @@ async def test_stopped_host_session_message_relaunches_runner(
         f"relaunch should carry the session workspace {_WORKSPACE!r}, "
         f"got {launch_frame.workspace!r}"
     )
+    assert launch_frame.isolation_generation == 0
+    assert launch_frame.isolation_host_id == _HOST_ID
+    assert launch_frame.isolation_masks == []
 
     # The relaunch minted a fresh token-bound runner_id so the server stops
     # routing to the dead runner — same rotation the offline-runner path does.

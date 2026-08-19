@@ -13,6 +13,7 @@ import type { HostFilesystemEntry } from "./useHostFilesystem";
 import {
   buildHostFilesystemUrl,
   createHostDirectory,
+  ensureHostDirectory,
   shouldRetryHostFilesystem,
   useHostFilesystem,
 } from "./useHostFilesystem";
@@ -271,5 +272,39 @@ describe("createHostDirectory", () => {
     await expect(createHostDirectory("host_abc", "/Users/me/dup")).rejects.toThrow(
       "directory already exists",
     );
+  });
+});
+
+describe("ensureHostDirectory", () => {
+  const fetchMock = vi.fn();
+
+  beforeEach(() => {
+    fetchMock.mockReset();
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("creates a missing directory on the selected host", async () => {
+    fetchMock.mockResolvedValueOnce(new Response(null, { status: 404 })).mockResolvedValueOnce(
+      new Response(JSON.stringify({ object: "directory", path: "/srv/private" }), {
+        status: 200,
+      }),
+    );
+
+    await expect(ensureHostDirectory("host_abc", "/srv/private")).resolves.toBe("/srv/private");
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "/v1/hosts/host_abc/filesystem/srv/private?limit=1",
+      "/v1/hosts/host_abc/directories",
+    ]);
+  });
+
+  it("does not create a directory that already exists", async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ data: [] }), { status: 200 }));
+
+    await expect(ensureHostDirectory("host_abc", "/srv/private")).resolves.toBe("/srv/private");
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 });

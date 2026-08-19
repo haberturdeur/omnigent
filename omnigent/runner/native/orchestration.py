@@ -168,6 +168,21 @@ class _CodexNativeModelOptionsNotReady(RuntimeError):
     """Raised when Codex model options are requested before bridge startup."""
 
 
+def _runner_in_process_callback_headers(
+    server_url: str, bearer_token: str | None
+) -> dict[str, str]:
+    """Build headers for callbacks made inside the trusted runner process."""
+    from omnigent.cli_auth import databricks_request_headers
+    from omnigent.runner._entry import _runner_tunnel_binding_token_from_env
+    from omnigent.runner.identity import RUNNER_TUNNEL_TOKEN_HEADER
+
+    headers = databricks_request_headers(server_url, bearer_token=bearer_token)
+    binding_token = _runner_tunnel_binding_token_from_env()
+    if binding_token is not None:
+        headers[RUNNER_TUNNEL_TOKEN_HEADER] = binding_token
+    return headers
+
+
 async def _cancel_auto_forwarder_task(session_id: str) -> None:
     """
     Cancel and await the session's registered transcript forwarder, if any.
@@ -3653,11 +3668,12 @@ async def _auto_create_kimi_terminal(
     # the workspace-routing header so neither is dropped.
     from omnigent.cli_auth import databricks_request_headers
 
-    _runner_headers = databricks_request_headers(server_url, bearer_token=_auth_token)
+    _hook_headers = databricks_request_headers(server_url, bearer_token=_auth_token)
+    _runner_headers = _runner_in_process_callback_headers(server_url, _auth_token)
     write_hook_config(
         bridge_dir,
         server_url=server_url,
-        headers=_runner_headers,
+        headers=_hook_headers,
         session_id=session_id,
     )
     kimi_env = build_kimi_session_home(
@@ -4524,7 +4540,7 @@ async def _codex_discover_thread_and_forward(
         server_url = _required_runner_env("RUNNER_SERVER_URL")
         auth_factory = _make_auth_token_factory()
         auth_token = auth_factory() if auth_factory is not None else None
-        headers: dict[str, str] = {"Authorization": f"Bearer {auth_token}"} if auth_token else {}
+        headers = _runner_in_process_callback_headers(server_url, auth_token)
 
         # Mirror the discovered Codex thread id onto the Omnigent session as its
         # external_session_id, the same way claude-native records its
@@ -4630,7 +4646,7 @@ async def _codex_forward_known_thread(
     server_url = _required_runner_env("RUNNER_SERVER_URL")
     auth_factory = _make_auth_token_factory()
     auth_token = auth_factory() if auth_factory is not None else None
-    headers = {"Authorization": f"Bearer {auth_token}"} if auth_token else {}
+    headers = _runner_in_process_callback_headers(server_url, auth_token)
     try:
         await supervise_forwarder(
             base_url=server_url,
@@ -4923,7 +4939,7 @@ async def _auto_create_antigravity_terminal(
     server_url = _required_runner_env("RUNNER_SERVER_URL")
     auth_factory = _make_auth_token_factory()
     auth_token = auth_factory() if auth_factory is not None else None
-    runner_headers = {"Authorization": f"Bearer {auth_token}"} if auth_token else {}
+    runner_headers = _runner_in_process_callback_headers(server_url, auth_token)
 
     # Seed bridge state with the id known so far (the real id on resume; on a
     # fresh launch a placeholder the cold-start below replaces with agy's real
@@ -6457,7 +6473,8 @@ async def _auto_create_claude_terminal(
     # workspace-routing header so neither is dropped.
     from omnigent.cli_auth import databricks_request_headers
 
-    _runner_headers = databricks_request_headers(server_url, bearer_token=_auth_token)
+    _hook_headers = databricks_request_headers(server_url, bearer_token=_auth_token)
+    _runner_headers = _runner_in_process_callback_headers(server_url, _auth_token)
     _runner_auth = _RunnerDatabricksAuth(_auth_factory)
 
     from omnigent.claude_native import (
@@ -6865,7 +6882,7 @@ async def _auto_create_claude_terminal(
         base_claude_args,
         bridge_dir=bridge_dir,
         ap_server_url=server_url,
-        ap_auth_headers=_runner_headers,
+        ap_auth_headers=_hook_headers,
         bundle_dir=bundle_dir,
         agent_name=agent_name,
         skills_filter=skills_filter,

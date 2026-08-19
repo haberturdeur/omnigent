@@ -24,6 +24,40 @@ fun originOf(url: String?): String? {
     return if (hasExplicitPort) "$scheme://$host:$port" else "$scheme://$host"
 }
 
+/** True when [url] is the configured server page or a path descendant of it. */
+fun isWithinServerBase(
+    url: String?,
+    serverBaseUrl: String?,
+): Boolean {
+    if (originOf(url) == null || originOf(url) != originOf(serverBaseUrl)) return false
+    val candidate =
+        url
+            ?.let(Uri::parse)
+            ?.path
+            .orEmpty()
+            .trustedBasePath() ?: return false
+    val base =
+        serverBaseUrl
+            ?.let(Uri::parse)
+            ?.path
+            .orEmpty()
+            .trustedBasePath() ?: return false
+    return base == "/" || candidate == base || candidate.startsWith("$base/")
+}
+
+private fun String.trustedBasePath(): String? {
+    if ('\\' in this || split('/').any { it == "." || it == ".." }) return null
+    val rooted =
+        if (isBlank()) {
+            "/"
+        } else if (startsWith('/')) {
+            this
+        } else {
+            "/$this"
+        }
+    return if (rooted == "/") rooted else rooted.trimEnd('/')
+}
+
 /**
  * True for the only two schemes the WebView loads inline (http/https). This
  * gates a security boundary (which navigations load in the bridged WebView vs.
@@ -95,8 +129,8 @@ fun databricksWorkspaceUiUrl(url: String?): String? {
 }
 
 /**
- * Normalize user-entered server text into a loadable URL, or null if it isn't a
- * usable http(s) address. Adds a default `https://` scheme when omitted and
+ * Normalize user-entered server text into a TLS URL, or null if it isn't a
+ * usable HTTPS address. Adds the required `https://` scheme when omitted and
  * trims a trailing slash.
  */
 fun normalizeServerUrl(input: String): String? {
@@ -107,7 +141,7 @@ fun normalizeServerUrl(input: String): String? {
     val withScheme = if (trimmed.contains("://")) trimmed else "https://$trimmed"
     val uri = Uri.parse(withScheme)
     val scheme = uri.scheme?.lowercase() ?: return null
-    if (!isHttpScheme(scheme)) return null
+    if (scheme != "https") return null
     if (uri.host.isNullOrBlank()) return null
     return withScheme.trimEnd('/')
 }

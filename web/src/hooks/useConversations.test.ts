@@ -21,9 +21,10 @@ import {
   useProjects,
   useProjectConfig,
   useProjectSessions,
-  useRenameProject,
   useUpdateProjectConfig,
   useMoveToProject,
+  useMoveProjectToProfile,
+  useRenameProject,
   useRenameConversation,
   useStopAndDeleteConversation,
   useStopSession,
@@ -1330,7 +1331,22 @@ describe("useTogglePinnedConversation old-server fallback", () => {
     return { queryClient, rendered };
   }
 
-  beforeEach(() => localStorage.clear());
+  const stored = new Map<string, string>();
+  const storage: Storage = {
+    get length() {
+      return stored.size;
+    },
+    clear: () => stored.clear(),
+    getItem: (key) => stored.get(key) ?? null,
+    key: (index) => [...stored.keys()][index] ?? null,
+    removeItem: (key) => stored.delete(key),
+    setItem: (key, value) => stored.set(key, value),
+  };
+
+  beforeEach(() => {
+    stored.clear();
+    vi.stubGlobal("localStorage", storage);
+  });
 
   it("pins to localStorage and does NOT PATCH the server", async () => {
     const { queryClient, rendered } = seedOldServer();
@@ -1342,9 +1358,9 @@ describe("useTogglePinnedConversation old-server fallback", () => {
     // server drops.
     expect(fetchMock).not.toHaveBeenCalled();
     // Persisted to the legacy localStorage key so the migration picks it up.
-    expect(JSON.parse(localStorage.getItem(PINNED_CONVERSATION_IDS_STORAGE_KEY) ?? "[]")).toEqual([
-      "conv_x",
-    ]);
+    expect(
+      JSON.parse(window.localStorage.getItem(PINNED_CONVERSATION_IDS_STORAGE_KEY) ?? "[]"),
+    ).toEqual(["conv_x"]);
     // Optimistic cache patch still moved the row into the Pinned section.
     const pinned = queryClient.getQueryData<PinnedConversationsResult>(PINNED_CONVERSATIONS_KEY);
     expect(pinned!.conversations.map((c) => c.id)).toContain("conv_x");
@@ -1353,7 +1369,7 @@ describe("useTogglePinnedConversation old-server fallback", () => {
   });
 
   it("unpins by removing the id from localStorage", async () => {
-    localStorage.setItem(PINNED_CONVERSATION_IDS_STORAGE_KEY, JSON.stringify(["conv_x"]));
+    window.localStorage.setItem(PINNED_CONVERSATION_IDS_STORAGE_KEY, JSON.stringify(["conv_x"]));
     const { queryClient, rendered } = seedOldServer([
       conversation({ id: "conv_x", updated_at: 150 }),
     ]);
@@ -1362,7 +1378,7 @@ describe("useTogglePinnedConversation old-server fallback", () => {
     await waitFor(() => expect(rendered.result.current.isSuccess).toBe(true));
 
     expect(fetchMock).not.toHaveBeenCalled();
-    expect(localStorage.getItem(PINNED_CONVERSATION_IDS_STORAGE_KEY)).toBeNull();
+    expect(window.localStorage.getItem(PINNED_CONVERSATION_IDS_STORAGE_KEY)).toBeNull();
     expect(
       queryClient.getQueryData<PinnedConversationsResult>(PINNED_CONVERSATIONS_KEY)?.conversations,
     ).toEqual([]);
@@ -1387,7 +1403,7 @@ describe("useTogglePinnedConversation old-server fallback", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect((fetchMock.mock.calls[0] as [string, RequestInit])[1].method).toBe("PATCH");
-    expect(localStorage.getItem(PINNED_CONVERSATION_IDS_STORAGE_KEY)).toBeNull();
+    expect(window.localStorage.getItem(PINNED_CONVERSATION_IDS_STORAGE_KEY)).toBeNull();
   });
 
   it("rolls back the optimistic pin when the local write fails (e.g. storage full)", async () => {
@@ -1395,7 +1411,7 @@ describe("useTogglePinnedConversation old-server fallback", () => {
     // swallowed failure would report success while the pin vanishes on reload.
     // It must throw → reject the mutation → roll back the optimistic patch.
     const { queryClient, rendered } = seedOldServer();
-    const setItemSpy = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+    const setItemSpy = vi.spyOn(storage, "setItem").mockImplementation(() => {
       throw new DOMException("QuotaExceededError");
     });
 
@@ -2393,6 +2409,75 @@ describe("useArchiveConversation", () => {
       .pages[0].data;
     expect(rows[0].archived).toBe(false);
     expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: ["conversations"] });
+  });
+});
+
+describe("useMoveProjectToProfile", () => {
+  it("sends one project move request without pre-mutating member sessions", async () => {
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({ id: "p_1", name: "Sprint 42", profile_id: "profile_destination" }),
+    );
+    const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client: queryClient }, children);
+    const { result } = renderHook(() => useMoveProjectToProfile(), { wrapper });
+
+    result.current.mutate({
+      id: "p_1",
+      name: "Sprint 42",
+      profileId: "profile_destination",
+    });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/v1/projects/p_1");
+    expect(init.method).toBe("PATCH");
+    expect(JSON.parse(init.body as string)).toEqual({ profile_id: "profile_destination" });
+  });
+});
+
+describe("useRenameProject", () => {
+  it("renames and adopts a first-class project with one PATCH", async () => {
+    fetchMock.mockResolvedValueOnce(mockResponse({ id: "p_1", name: "After" }));
+    const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client: queryClient }, children);
+    const { result } = renderHook(() => useRenameProject(), { wrapper });
+
+    result.current.mutate({ id: "p_1", oldName: "Before", newName: "After" });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/v1/projects/p_1");
+    expect(init.method).toBe("PATCH");
+    expect(JSON.parse(init.body as string)).toEqual({
+      name: "After",
+      adopt_legacy_name: "Before",
+    });
+  });
+
+  it("promotes a label-only folder with one create and one adoption PATCH", async () => {
+    fetchMock
+      .mockResolvedValueOnce(mockResponse({ id: "p_new", name: "After" }))
+      .mockResolvedValueOnce(mockResponse({ id: "p_new", name: "After" }));
+    const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client: queryClient }, children);
+    const { result } = renderHook(() => useRenameProject(), { wrapper });
+
+    result.current.mutate({ id: null, oldName: "Before", newName: "After" });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [url, init] = fetchMock.mock.calls[1] as [string, RequestInit];
+    expect(url).toBe("/v1/projects/p_new");
+    expect(init.method).toBe("PATCH");
+    expect(JSON.parse(init.body as string)).toEqual({
+      name: "After",
+      adopt_legacy_name: "Before",
+    });
   });
 });
 

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import functools
 import mimetypes
 import ntpath
@@ -27,6 +29,7 @@ from omnigent.entities import (
     Conversation,
     StoredFile,
 )
+from omnigent.entities.environment_filesystem import MAX_FILE_DOWNLOAD_BYTES
 from omnigent.entities.session_resources import session_resource_view_to_dict
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.native_coding_agents import (
@@ -251,6 +254,7 @@ def register_resources_routes(
         path: str,
         conversation: Conversation,
         params: dict[str, str] | None = None,
+        timeout: float = 10.0,
     ) -> dict[str, Any]:
         """Proxy a GET request to the runner and return parsed JSON.
 
@@ -259,6 +263,7 @@ def register_resources_routes(
         :param conversation: Conversation loaded during authorization.
         :param params: Optional query params forwarded to the runner,
             e.g. ``{"order": "asc"}``. ``None`` sends no query string.
+        :param timeout: Runner response timeout in seconds.
         :returns: Parsed JSON response body.
         :raises HTTPException: 502 on runner failure.
         """
@@ -272,7 +277,7 @@ def register_resources_routes(
                 detail="no runner available for resource access",
             )
         try:
-            resp = await runner_client.get(path, params=params, timeout=10.0)
+            resp = await runner_client.get(path, params=params, timeout=timeout)
         except (httpx.HTTPError, ConnectionError) as exc:
             raise HTTPException(
                 status_code=502,
@@ -290,6 +295,12 @@ def register_resources_routes(
                 error = response_payload.get("error")
                 if isinstance(error, dict) and isinstance(error.get("message"), str):
                     message = error["message"]
+            _logger.info(
+                "Runner filesystem resource not found: session=%s path=%s reason=%s",
+                session_id,
+                path,
+                message,
+            )
             raise OmnigentError(
                 message,
                 code=ErrorCode.NOT_FOUND,
@@ -315,6 +326,7 @@ def register_resources_routes(
         host_params: dict[str, Any],
         runner_path: str,
         runner_params: dict[str, str] | None = None,
+        runner_timeout: float = 10.0,
         host_workspace_resolver: Callable[[], Awaitable[str]] | None = None,
     ) -> dict[str, Any]:
         """Serve a filesystem read, falling back to the host when offline.
@@ -334,6 +346,7 @@ def register_resources_routes(
         :param host_params: Op-specific args for the host reader.
         :param runner_path: Runner-relative URL for the live path.
         :param runner_params: Optional query params for the runner path.
+        :param runner_timeout: Runner response timeout in seconds.
         :param host_workspace_resolver: Resolves the absolute root the host
             reader should be rooted at, for an absolute browse target.
             Awaited ONLY when the fallback is actually taken: a live runner
@@ -353,6 +366,7 @@ def register_resources_routes(
                 runner_path,
                 conversation,
                 params=runner_params,
+                timeout=runner_timeout,
             )
         except OmnigentError as exc:
             # Only the runner-offline case is a candidate for the host
@@ -2015,6 +2029,92 @@ def register_resources_routes(
             op="diff",
             host_params={"path": relative_path},
             runner_path=path,
+        )
+
+    @router.get(
+        "/sessions/{session_id}/resources/environments"
+        "/{environment_id}/filesystem-download/{relative_path:path}",
+        include_in_schema=False,
+        response_model=None,
+    )
+    async def download_environment_file(
+        request: Request,
+        session_id: str,
+        environment_id: str,
+        relative_path: str,
+    ) -> Response:
+        """Download a complete, bounded workspace file."""
+        absolute = relative_path.startswith("/")
+        conv = await _validate_session(
+            session_id, request, _browse_level(relative_path, within_workspace=LEVEL_READ)
+        )
+        runner_rel = (
+            "%2F" + urllib.parse.quote(relative_path.lstrip("/")) if absolute else relative_path
+        )
+        path = (
+            f"/v1/sessions/{session_id}/resources/environments"
+            f"/{environment_id}/filesystem/{runner_rel}"
+        )
+        resolver = (
+            functools.partial(_authorize_absolute_browse, conv, relative_path)
+            if absolute
+            else None
+        )
+        payload = await _fs_get_with_host_fallback(
+            session_id,
+            conv,
+            op="list_or_read",
+            host_params={
+                "path": "" if absolute else relative_path,
+                "max_bytes": MAX_FILE_DOWNLOAD_BYTES,
+                "download": True,
+            },
+            runner_path=path,
+            runner_params={
+                "max_bytes": str(MAX_FILE_DOWNLOAD_BYTES),
+                "download": "true",
+            },
+            runner_timeout=60.0,
+            host_workspace_resolver=resolver,
+        )
+        if payload.get("object") != "session.environment.filesystem.file_content":
+            raise HTTPException(status_code=400, detail="Path is not a file")
+        if payload.get("truncated") is True:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File exceeds the {MAX_FILE_DOWNLOAD_BYTES // (1024 * 1024)} MiB limit",
+            )
+
+        content = payload.get("content")
+        encoding = payload.get("encoding")
+        if not isinstance(content, str):
+            raise HTTPException(status_code=502, detail="Invalid file payload from runner")
+        try:
+            if encoding == "base64":
+                raw = base64.b64decode(content, validate=True)
+            elif encoding == "utf-8":
+                raw = content.encode("utf-8")
+            else:
+                raise ValueError("unsupported encoding")
+        except (ValueError, binascii.Error) as exc:
+            raise HTTPException(
+                status_code=502, detail="Invalid file payload from runner"
+            ) from exc
+
+        filename = ntpath.basename(relative_path.rstrip("/")) or "download"
+        content_type = payload.get("content_type")
+        media_type = (
+            content_type
+            if isinstance(content_type, str) and content_type
+            else mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        )
+        return Response(
+            content=raw,
+            media_type=media_type,
+            headers={
+                "Content-Disposition": _attachment_disposition(filename),
+                "X-Content-Type-Options": "nosniff",
+            },
         )
 
     @file_read_router.get(

@@ -42,6 +42,7 @@ from omnigent.host.frames import (
     HostListDirResultFrame,
     HostListWorktreesResultFrame,
     HostModelOptionsResultFrame,
+    HostMoveDirResultFrame,
     HostRemoveWorktreeResultFrame,
     HostRunnerExitedFrame,
     HostRunnerStatusResultFrame,
@@ -688,6 +689,19 @@ async def _receive_loop(
                     {
                         "status": frame.status,
                         "path": frame.path,
+                        "error": frame.error,
+                    }
+                )
+            continue
+
+        if isinstance(frame, HostMoveDirResultFrame):
+            move_dir_future = conn.pending_move_dirs.pop(frame.request_id, None)
+            if move_dir_future is not None and not move_dir_future.done():
+                move_dir_future.set_result(
+                    {
+                        "status": frame.status,
+                        "source_path": frame.source_path,
+                        "destination_path": frame.destination_path,
                         "error": frame.error,
                     }
                 )

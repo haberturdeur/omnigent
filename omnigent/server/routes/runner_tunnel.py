@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from ipaddress import ip_address
@@ -24,7 +25,12 @@ from ipaddress import ip_address
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 
 from omnigent.errors import ErrorCode, OmnigentError
-from omnigent.runner.identity import RUNNER_TUNNEL_TOKEN_HEADER, token_bound_runner_id
+from omnigent.runner.identity import (
+    RUNNER_ISOLATION_HOST_ID_HEADER,
+    RUNNER_PROTECTION_GENERATION_HEADER,
+    RUNNER_TUNNEL_TOKEN_HEADER,
+    token_bound_runner_id,
+)
 from omnigent.runner.transports.ws_tunnel.frames import (
     HelloFrame,
     PingFrame,
@@ -46,6 +52,8 @@ SUPPORTED_FRAME_PROTOCOL_MAJOR = 1
 PING_INTERVAL_S = 30.0
 PING_MISS_THRESHOLD = 3
 RUNNER_ID_MISMATCH_CLOSE_CODE = 4004
+RUNNER_PROTECTION_STALE_CLOSE_CODE = 4005
+GENERATION_WATCH_INTERVAL_S = 0.5
 _ON_RUNNER_CONNECT_TIMEOUT_SEC = 30.0
 
 # Lifetime of a managed runner's minted owner bearer (POST
@@ -161,6 +169,7 @@ def create_runner_tunnel_router(
     auth_provider: AuthProvider | None = None,
     runner_exit_reports: RunnerExitReports | None = None,
     resolve_managed_runner_owner: Callable[[str], str | None] | None = None,
+    declared_protected_profile_ids: Callable[[], frozenset[str]] | None = None,
 ) -> APIRouter:
     """Build the router hosting the ``/runners/{id}/tunnel`` WS endpoint.
 
@@ -199,6 +208,8 @@ def create_runner_tunnel_router(
         runner-side analog of the host tunnel's ``resolve_launch_token``.
         ``None`` disables the lookup (an unauthenticated non-loopback
         peer is then rejected, the prior behavior).
+    :param declared_protected_profile_ids: Shared database view of profiles
+        marked private. A mismatch with the isolation registry rejects runners.
     :returns: A FastAPI router with the tunnel endpoint.
     """
     router = APIRouter()
@@ -360,6 +371,43 @@ def create_runner_tunnel_router(
         8. On disconnect: deregister, abort in-flight.
         """
         is_loopback = _is_loopback_websocket_client(ws)
+        from omnigent.server.profile_protection import (
+            profile_protection_generation,
+            read_protected_profiles,
+            register_runner_generation_lease,
+            unregister_runner_generation_lease,
+        )
+
+        current_generation = profile_protection_generation()
+        registry_profiles = read_protected_profiles()
+        raw_generation = ws.headers.get(RUNNER_PROTECTION_GENERATION_HEADER)
+        isolation_host_id = ws.headers.get(RUNNER_ISOLATION_HOST_ID_HEADER)
+        legacy_runner = raw_generation is None
+        generation_rejection: str | None = None
+        if declared_protected_profile_ids is not None:
+            declared_ids = declared_protected_profile_ids()
+            registry_ids = frozenset(profile.profile_id for profile in registry_profiles)
+            if declared_ids != registry_ids:
+                generation_rejection = "server protection registry is inconsistent"
+        if raw_generation is not None:
+            try:
+                runner_generation = int(raw_generation)
+            except ValueError:
+                runner_generation = -1
+            if (
+                runner_generation < 0
+                or str(runner_generation) != raw_generation
+                or runner_generation != current_generation
+            ):
+                generation_rejection = "runner protection generation is stale"
+            elif not isolation_host_id:
+                generation_rejection = "runner isolation host id is required"
+        else:
+            # Through 0.11.x, old hosts omit this header and are safe only when
+            # no private roots exist. Remove the fallback in 0.12.0.
+            runner_generation = current_generation
+            if registry_profiles:
+                generation_rejection = "runner protection generation is required"
         try:
             expected_runner_id = _expected_runner_id_from_headers(
                 ws.headers,
@@ -438,6 +486,39 @@ def create_runner_tunnel_router(
                 await ws.close(code=RUNNER_ID_MISMATCH_CLOSE_CODE, reason="unauthenticated")
                 return
 
+        if generation_rejection is not None:
+            # Reject after authentication and after the WebSocket upgrade. A
+            # pre-accept close is rendered by Uvicorn as an opaque HTTP 403, so
+            # the runner never receives the fatal 4005 generation close code.
+            await ws.accept()
+            await ws.close(
+                code=RUNNER_PROTECTION_STALE_CLOSE_CODE,
+                reason=generation_rejection,
+            )
+            return
+
+        if legacy_runner and not is_loopback:
+            _logger.warning(
+                "Runner %s connected without a protection generation; "
+                "upgrade its host before 0.12.0",
+                runner_id,
+            )
+
+        lease_id = secrets.token_urlsafe(24)
+        lease_registered = await asyncio.to_thread(
+            register_runner_generation_lease,
+            runner_id,
+            runner_generation,
+            lease_id,
+        )
+        if not lease_registered:
+            await ws.accept()
+            await ws.close(
+                code=RUNNER_PROTECTION_STALE_CLOSE_CODE,
+                reason="runner protection generation is stale",
+            )
+            return
+
         await ws.accept()
         session: RunnerSession | None = None
         try:
@@ -446,6 +527,17 @@ def create_runner_tunnel_router(
             frame = decode_frame(raw)
             if not isinstance(frame, HelloFrame):
                 await ws.close(code=4001, reason="expected hello frame")
+                return
+
+            from omnigent.server.profile_protection import refresh_runner_generation_lease
+
+            if not await asyncio.to_thread(
+                refresh_runner_generation_lease, lease_id, runner_generation
+            ):
+                await ws.close(
+                    code=RUNNER_PROTECTION_STALE_CLOSE_CODE,
+                    reason="runner protection generation is stale",
+                )
                 return
 
             # 4. Version-skew check (strict-major).
@@ -481,12 +573,16 @@ def create_runner_tunnel_router(
             # loop running, any ``WSTunnelTransport``-backed request
             # the hook makes would deadlock on its response future.
             sender_task = asyncio.create_task(
-                _sender_loop(ws, session),
+                _sender_loop(ws, session, runner_generation),
                 name=f"tunnel-sender:{runner_id}",
             )
             ping_task = asyncio.create_task(
                 _ping_loop(ws, session, runner_id, registry),
                 name=f"tunnel-ping:{runner_id}",
+            )
+            generation_task = asyncio.create_task(
+                _generation_watch_loop(ws, lease_id, runner_generation),
+                name=f"tunnel-generation:{runner_id}",
             )
             receive_task = asyncio.create_task(
                 _receive_loop(ws, session, runner_id, registry),
@@ -517,7 +613,7 @@ def create_runner_tunnel_router(
 
             try:
                 done, _pending = await asyncio.wait(
-                    {sender_task, ping_task, receive_task},
+                    {sender_task, ping_task, receive_task, generation_task},
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 for task in done:
@@ -560,12 +656,13 @@ def create_runner_tunnel_router(
                         )
                     raise task_error
             finally:
-                for task in (sender_task, ping_task, receive_task):
+                for task in (sender_task, ping_task, receive_task, generation_task):
                     task.cancel()
                 await asyncio.gather(
                     sender_task,
                     ping_task,
                     receive_task,
+                    generation_task,
                     return_exceptions=True,
                 )
                 registry.deregister(runner_id, session)
@@ -608,11 +705,40 @@ def create_runner_tunnel_router(
                         "on_runner_disconnect callback failed for %s",
                         runner_id,
                     )
+        finally:
+            await asyncio.to_thread(unregister_runner_generation_lease, lease_id)
 
     return router
 
 
-async def _sender_loop(ws: WebSocket, session: RunnerSession) -> None:
+async def _generation_watch_loop(
+    ws: WebSocket,
+    lease_id: str,
+    generation: int,
+) -> None:
+    """Close a tunnel as soon as its durable generation lease is stale."""
+    from omnigent.server.profile_protection import refresh_runner_generation_lease
+
+    while True:
+        await asyncio.sleep(GENERATION_WATCH_INTERVAL_S)
+        current = await asyncio.to_thread(
+            refresh_runner_generation_lease,
+            lease_id,
+            generation,
+        )
+        if current:
+            continue
+        try:
+            await ws.close(
+                code=RUNNER_PROTECTION_STALE_CLOSE_CODE,
+                reason="runner protection generation is stale",
+            )
+        except RuntimeError:
+            _logger.debug("Runner websocket already closed during generation fencing")
+        return
+
+
+async def _sender_loop(ws: WebSocket, session: RunnerSession, generation: int) -> None:
     """Send queued frames on the WebSocket owner loop.
 
     :param ws: Accepted Starlette WebSocket.
@@ -623,6 +749,15 @@ async def _sender_loop(ws: WebSocket, session: RunnerSession) -> None:
     while True:
         data = await session.outbound_queue.get()
         if data is None:
+            return
+        from omnigent.server.profile_protection import profile_protection_generation
+
+        current_generation = await asyncio.to_thread(profile_protection_generation)
+        if current_generation != generation:
+            await ws.close(
+                code=RUNNER_PROTECTION_STALE_CLOSE_CODE,
+                reason="runner protection generation is stale",
+            )
             return
         await ws.send_text(data)
 
