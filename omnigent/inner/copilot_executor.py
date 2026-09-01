@@ -342,9 +342,15 @@ def _encode_tool_result(result: object) -> object:
 
 
 class _CopilotSession(Protocol):
-    """SDK session methods used by the executor."""
+    """SDK session methods used by the executor.
 
-    def on(self, callback: Callable[[object], None]) -> Callable[[], None]:
+    Parameter names and annotations mirror ``copilot.CopilotSession`` — a
+    structural protocol only matches when they line up, and the SDK's ``on``
+    takes a ``handler`` accepting its own ``SessionEvent`` type (kept as ``Any``
+    here so the module still type-checks without the optional extra installed).
+    """
+
+    def on(self, handler: Callable[[Any], None]) -> Callable[[], None]:  # type: ignore[explicit-any]
         pass
 
     async def send_and_wait(
