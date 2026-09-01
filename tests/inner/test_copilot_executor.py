@@ -16,6 +16,8 @@ import asyncio
 import os
 import sys
 import types
+import uuid
+from collections.abc import Iterable
 from typing import Any
 
 import pytest
@@ -28,10 +30,12 @@ from omnigent.inner.copilot_executor import (
     _ambient_github_token,
     _build_copilot_prompt,
     _coerce_args,
+    _copilot_session_id,
     _encode_tool_result,
     _event_data,
     _finalize_usage,
     _permission_policy_input,
+    _resolve_agent_mode,
     _resolve_model,
     _resolve_reasoning_effort,
 )
@@ -89,8 +93,11 @@ class _FakeSession:
         self._state["unsub_calls"] = self._state.get("unsub_calls", 0)
         return _Unsub(self, handler)
 
-    async def send_and_wait(self, prompt: str, *, timeout: float = 60.0) -> Any:
+    async def send_and_wait(
+        self, prompt: str, *, timeout: float = 60.0, agent_mode: str | None = None
+    ) -> Any:
         self._state["sent"].append(prompt)
+        self._state["sent_agent_modes"].append(agent_mode)
         await asyncio.sleep(0)
         if self._send_exc is not None and self._state.get("send_exc_remaining", 0) > 0:
             self._state["send_exc_remaining"] -= 1
@@ -136,6 +143,7 @@ def _install_fake_copilot(
     start_exc: Exception | None = None,
     send_exc: Exception | None = None,
     send_exc_times: int = 1,
+    resumable_session_ids: Iterable[str] | None = None,
 ) -> dict[str, Any]:
     """Install a fake ``copilot`` module; return a capture dict.
 
@@ -143,6 +151,8 @@ def _install_fake_copilot(
     *send_exc*, when set, makes ``send_and_wait`` raise it for the first
     *send_exc_times* calls (then behave normally), so the mid-turn
     ``send_and_wait`` failure path can be exercised and recovery verified.
+    *resumable_session_ids* are the ids ``resume_session`` accepts; any other id
+    raises, mirroring the SDK's "no such stored session" behavior.
     """
     state: dict[str, Any] = {
         "client_kwargs": [],
@@ -154,6 +164,9 @@ def _install_fake_copilot(
         "aborted": 0,
         "turn_scripts": list(turn_scripts or []),
         "send_exc_remaining": send_exc_times if send_exc is not None else 0,
+        "sent_agent_modes": [],
+        "resume_kwargs": [],
+        "resumable_session_ids": set(resumable_session_ids or ()),
     }
 
     class _FakeClient:
@@ -172,6 +185,14 @@ def _install_fake_copilot(
             state["create_kwargs"].append(kwargs)
             if create_exc is not None:
                 raise create_exc
+            return _FakeSession(state, send_exc=send_exc)
+
+        async def resume_session(self, session_id: str, **kwargs: Any) -> _FakeSession:
+            state["resume_kwargs"].append({"session_id": session_id, **kwargs})
+            if not state["resumable_session_ids"]:
+                raise RuntimeError(f"no stored session {session_id}")
+            if session_id not in state["resumable_session_ids"]:
+                raise RuntimeError(f"no stored session {session_id}")
             return _FakeSession(state, send_exc=send_exc)
 
     class _Tool:
@@ -1359,4 +1380,133 @@ async def test_run_turn_usage_accumulates_cache_read_write_through_events(
         "cache_creation_input_tokens": 8,
         "total_tokens": 16,
     }
+    await ex.close()
+
+
+# ---------------------------------------------------------------------------
+# Durable session id / resume
+# ---------------------------------------------------------------------------
+
+
+def test_copilot_session_id_is_stable_and_per_conversation() -> None:
+    """The id is a pure function of the conversation, so a new process resumes."""
+    first = _copilot_session_id("conv1")
+    assert first == _copilot_session_id("conv1")
+    assert first != _copilot_session_id("conv2")
+    # A UUID string is what the SDK accepts as a session id.
+    assert str(uuid.UUID(first)) == first
+
+
+@pytest.mark.asyncio
+async def test_first_turn_creates_under_the_derived_session_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No stored session yet: resume is attempted, then create claims the id."""
+    state = _install_fake_copilot(monkeypatch, [[_ev("ASSISTANT_MESSAGE", content="hi")]])
+    ex = CopilotExecutor(github_token="gho_x")
+    _ = [e async for e in ex.run_turn([_user("first")], [], "SYS")]
+    expected = _copilot_session_id("conv1")
+    assert [r["session_id"] for r in state["resume_kwargs"]] == [expected]
+    assert state["create_kwargs"][0]["session_id"] == expected
+    await ex.close()
+
+
+@pytest.mark.asyncio
+async def test_new_process_resumes_stored_session_without_replaying_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reattached session already holds the turns, so only the new text is sent."""
+    resumable = _copilot_session_id("conv1")
+    state = _install_fake_copilot(
+        monkeypatch,
+        [[_ev("ASSISTANT_MESSAGE", content="welcome back")]],
+        resumable_session_ids=[resumable],
+    )
+    ex = CopilotExecutor(github_token="gho_x")
+    history: list[Message] = [
+        _user("first"),
+        {"role": "assistant", "content": "earlier answer", "session_id": "conv1"},
+        _user("second"),
+    ]
+    _ = [e async for e in ex.run_turn(history, [], "SYS")]
+    # Resumed, so no create_session and no "Conversation so far:" replay.
+    assert state["create_kwargs"] == []
+    assert state["sent"] == ["second"]
+    await ex.close()
+
+
+@pytest.mark.asyncio
+async def test_history_is_replayed_when_no_stored_session_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without a resumable session the first prompt still carries context."""
+    state = _install_fake_copilot(monkeypatch, [[_ev("ASSISTANT_MESSAGE", content="ok")]])
+    ex = CopilotExecutor(github_token="gho_x")
+    history: list[Message] = [
+        _user("first"),
+        {"role": "assistant", "content": "earlier answer", "session_id": "conv1"},
+        _user("second"),
+    ]
+    _ = [e async for e in ex.run_turn(history, [], "SYS")]
+    assert state["sent"][0].startswith("Conversation so far:")
+    assert "earlier answer" in state["sent"][0]
+    await ex.close()
+
+
+# ---------------------------------------------------------------------------
+# Agent mode (plan / autopilot)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_agent_mode_accepts_copilot_and_omnigent_spellings() -> None:
+    assert _resolve_agent_mode(None) is None
+    assert _resolve_agent_mode(ExecutorConfig()) is None
+    assert _resolve_agent_mode(ExecutorConfig(extra={"agent_mode": "plan"})) == "plan"
+    assert _resolve_agent_mode(ExecutorConfig(extra={"agent_mode": "AUTOPILOT"})) == "autopilot"
+    # Omnigent's harness-agnostic collaboration_mode (codex-native's spelling).
+    assert _resolve_agent_mode(ExecutorConfig(extra={"collaboration_mode": "plan"})) == "plan"
+    assert (
+        _resolve_agent_mode(ExecutorConfig(extra={"collaboration_mode": "default"}))
+        == "interactive"
+    )
+    # Unsupported values are dropped, never raised.
+    assert _resolve_agent_mode(ExecutorConfig(extra={"agent_mode": "nope"})) is None
+    assert _resolve_agent_mode(ExecutorConfig(extra={"collaboration_mode": "nope"})) is None
+    # An explicit agent_mode wins over collaboration_mode.
+    assert (
+        _resolve_agent_mode(
+            ExecutorConfig(extra={"agent_mode": "plan", "collaboration_mode": "default"})
+        )
+        == "plan"
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_mode_rides_the_send_without_recreating_the_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Switching plan->execute must keep the session (and its context) alive."""
+    state = _install_fake_copilot(
+        monkeypatch,
+        [
+            [_ev("ASSISTANT_MESSAGE", content="a plan")],
+            [_ev("ASSISTANT_MESSAGE", content="doing it")],
+        ],
+    )
+    ex = CopilotExecutor(github_token="gho_x")
+    _ = [
+        e
+        async for e in ex.run_turn(
+            [_user("plan it")], [], "SYS", ExecutorConfig(extra={"collaboration_mode": "plan"})
+        )
+    ]
+    _ = [
+        e
+        async for e in ex.run_turn(
+            [_user("do it")], [], "SYS", ExecutorConfig(extra={"collaboration_mode": "default"})
+        )
+    ]
+    assert state["sent_agent_modes"] == ["plan", "interactive"]
+    # One session across the mode switch.
+    assert len(state["create_kwargs"]) == 1
     await ex.close()

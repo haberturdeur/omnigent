@@ -136,6 +136,18 @@ To route through OpenRouter / a gateway, declare a key/gateway provider in
 or set `auth.base_url` to the OpenAI-compatible endpoint alongside the key.
 For Databricks, use `auth: {type: databricks, profile: …}`.
 
+**Resume.** Copilot keeps its own session store, so Omnigent derives a stable
+Copilot session id from the conversation id and hands it back on reattach: a
+restarted runner continues the Copilot session rather than replaying the
+Omnigent transcript into a fresh one. Nothing extra is persisted — the id is a
+pure function of the conversation.
+
+**Plan mode.** Copilot's agent mode (`interactive`, `plan`, `autopilot`,
+`shell`) rides each message, so switching between planning and executing keeps
+the session and its context. Set it per turn via `extra.agent_mode`, or with
+Omnigent's harness-agnostic `extra.collaboration_mode` (`default` / `plan`,
+the spelling the codex-native Plan-mode toggle already persists).
+
 ### Kimi Code
 
 `harness: kimi` runs the agent through Moonshot AI's

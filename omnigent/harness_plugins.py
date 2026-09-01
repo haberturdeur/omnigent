@@ -643,7 +643,11 @@ _BUILTIN_CAPABILITIES: dict[str, HarnessCapabilities] = {
     "copilot": _C(
         _IM.SDK_IN_PROCESS,
         _EL.NONE,
-        _RS.COLD_ONLY,
+        # The SDK owns a durable session store keyed by the id Omnigent derives
+        # from the conversation (copilot_executor._copilot_session_id), so a new
+        # runner process reattaches to Copilot's own session instead of
+        # replaying the Omnigent transcript.
+        _RS.WARM_REATTACH,
         _EF.COPILOT,
         _MF.MULTI,
         _AU.OWN_AUTH,

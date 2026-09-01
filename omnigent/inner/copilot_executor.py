@@ -60,10 +60,11 @@ import asyncio
 import json
 import logging
 import os
+import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol, TypeAlias
+from typing import Any, Literal, Protocol, TypeAlias, cast
 
 from omnigent.llms._usage_observer import notify_from_dict as _notify_usage_from_dict
 from omnigent.reasoning_effort import COPILOT_EFFORTS, validate_effort
@@ -165,6 +166,76 @@ def _resolve_reasoning_effort(config: ExecutorConfig | None) -> str | None:
     except ValueError:
         logger.warning("Ignoring unsupported copilot reasoning effort: %r", raw_effort)
         return None
+
+
+# Namespace for deriving a stable Copilot session id from an Omnigent
+# conversation id. Fixed so the same conversation maps to the same Copilot
+# session across runner restarts and machines — that mapping IS the resume.
+_COPILOT_SESSION_NAMESPACE = uuid.UUID("6f1a5a3e-6a1d-5f0e-9c53-0f5a1b9d2c41")
+
+# Agent modes the Copilot SDK accepts on ``send`` / ``send_and_wait``.
+CopilotAgentMode: TypeAlias = Literal["interactive", "plan", "autopilot", "shell"]
+_COPILOT_AGENT_MODES: frozenset[str] = frozenset({"interactive", "plan", "autopilot", "shell"})
+
+# Omnigent's harness-agnostic collaboration-mode spelling -> Copilot's mode.
+# ``default`` is Omnigent's name for "just answer normally" (the codex-native
+# plan-mode toggle uses the same two values), which Copilot calls interactive.
+_COLLABORATION_MODE_TO_AGENT_MODE: dict[str, CopilotAgentMode] = {
+    "default": "interactive",
+    "plan": "plan",
+}
+
+
+def _copilot_session_id(session_key: str) -> str:
+    """Return the durable Copilot session id for an Omnigent conversation.
+
+    Copilot owns its own session store (keyed by a UUID it is handed at
+    creation), so resuming means handing back the SAME id rather than replaying
+    a transcript. Deriving it deterministically from *session_key* means a
+    fresh runner process — or a different machine sharing the store — reattaches
+    without Omnigent persisting an extra mapping.
+
+    :param session_key: Omnigent conversation id, e.g. ``"conv_abc123"``.
+    :returns: A UUID string, e.g. ``"3f2504e0-4f89-51d3-9a0c-0305e82c3301"``.
+    """
+    return str(uuid.uuid5(_COPILOT_SESSION_NAMESPACE, session_key))
+
+
+def _resolve_agent_mode(config: ExecutorConfig | None) -> CopilotAgentMode | None:
+    """Resolve the per-turn Copilot agent mode from ``config.extra``.
+
+    Accepts either Copilot's own spelling (``config.extra["agent_mode"]``:
+    ``interactive`` / ``plan`` / ``autopilot`` / ``shell``) or Omnigent's
+    harness-agnostic ``collaboration_mode`` (``default`` / ``plan``, the same
+    values the codex-native Plan-mode toggle persists), so one web control can
+    drive both harnesses.
+
+    Unlike the model and reasoning effort, the mode rides each ``send`` — so a
+    plan/execute switch does NOT recreate the session and lose its context.
+
+    An unrecognized value is dropped with a warning rather than raising: a bad
+    mode must not sink the turn (parity with :func:`_resolve_reasoning_effort`).
+
+    :param config: The per-turn executor config, or ``None``.
+    :returns: The Copilot agent mode, or ``None`` to keep the session's current
+        mode.
+    """
+    if config is None:
+        return None
+    raw = config.extra.get("agent_mode")
+    if raw is None:
+        collaboration = config.extra.get("collaboration_mode")
+        if collaboration is None:
+            return None
+        mapped = _COLLABORATION_MODE_TO_AGENT_MODE.get(str(collaboration).strip().lower())
+        if mapped is None:
+            logger.warning("Ignoring unsupported copilot collaboration mode: %r", collaboration)
+        return mapped
+    mode = str(raw).strip().lower()
+    if mode not in _COPILOT_AGENT_MODES:
+        logger.warning("Ignoring unsupported copilot agent mode: %r", raw)
+        return None
+    return cast(CopilotAgentMode, mode)
 
 
 def _tools_fingerprint(tools: list[ToolSpec]) -> str:
@@ -276,7 +347,13 @@ class _CopilotSession(Protocol):
     def on(self, callback: Callable[[object], None]) -> Callable[[], None]:
         pass
 
-    async def send_and_wait(self, prompt: str, *, timeout: float) -> object:
+    async def send_and_wait(
+        self,
+        prompt: str,
+        *,
+        timeout: float,
+        agent_mode: CopilotAgentMode | None = None,
+    ) -> object:
         pass
 
     async def abort(self) -> object:
@@ -294,6 +371,10 @@ class _CopilotSessionState:
     reasoning_effort: str | None = None
     tools_fingerprint: str | None = None
     has_sent_prompt: bool = False
+    # True when the SDK reattached to a stored Copilot session that already
+    # holds this conversation's turns, so the first prompt of THIS process must
+    # not re-serialize Omnigent history on top of it (see run_turn).
+    resumed: bool = False
     # call_id -> tool name, populated on TOOL_EXECUTION_START so the matching
     # TOOL_EXECUTION_COMPLETE (which carries only the id) can name its tool.
     call_names: dict[str, str] = field(default_factory=dict)
@@ -510,8 +591,13 @@ class CopilotExecutor(Executor):
         tools: list[ToolSpec],
         system_prompt: str,
         reasoning_effort: str | None = None,
+        session_id: str | None = None,
     ) -> None:
-        """Start the SDK client and create the session if not already live.
+        """Start the SDK client and create (or reattach) the session.
+
+        When *session_id* is given the stored Copilot session is resumed first
+        and only created when no such session exists, so a fresh runner process
+        continues the conversation Copilot already holds instead of replaying it.
 
         On any bring-up failure the partially-started client is stopped before
         propagating, so a bad token / launch error can't orphan the bundled
@@ -563,15 +649,32 @@ class CopilotExecutor(Executor):
             system_message = (
                 {"mode": "append", "content": system_prompt} if system_prompt else None
             )
-            session = await client.create_session(
-                model=model,
-                streaming=True,
-                system_message=system_message,
-                tools=self._make_tools(tools) or None,
-                on_permission_request=self._on_permission_request,
-                working_directory=cwd,
-                reasoning_effort=reasoning_effort or None,
-            )
+            session_kwargs: dict[str, Any] = {
+                "model": model,
+                "streaming": True,
+                "system_message": system_message,
+                "tools": self._make_tools(tools) or None,
+                "on_permission_request": self._on_permission_request,
+                "working_directory": cwd,
+                "reasoning_effort": reasoning_effort or None,
+            }
+            session = None
+            if session_id:
+                # Reattach first: the stored session already holds this
+                # conversation's turns. A missing/unreadable session is the
+                # normal first-turn case, so failure falls through to create.
+                try:
+                    session = await client.resume_session(session_id, **session_kwargs)
+                    state.resumed = True
+                except Exception as exc:  # noqa: BLE001 — no stored session yet
+                    logger.debug(
+                        "copilot-sdk: no resumable session %s (%s); creating it",
+                        session_id,
+                        exc,
+                    )
+            if session is None:
+                # Create UNDER the derived id so the next process can resume it.
+                session = await client.create_session(session_id=session_id, **session_kwargs)
         except BaseException:
             await _safe_stop(client)
             raise
@@ -588,6 +691,7 @@ class CopilotExecutor(Executor):
         session_key = self._session_key(messages)
         model = _resolve_model((config.model if config else None) or self._model_override)
         reasoning_effort = _resolve_reasoning_effort(config)
+        agent_mode = _resolve_agent_mode(config)
         tools_fp = _tools_fingerprint(tools)
         state = self._session_states.setdefault(session_key, _CopilotSessionState())
 
@@ -604,20 +708,33 @@ class CopilotExecutor(Executor):
             await self._close_state(state)
             state = _CopilotSessionState()
             self._session_states[session_key] = state
-        is_first_turn = not state.has_sent_prompt
+        # Whether Omnigent history must be serialized into this prompt. Settled
+        # AFTER _ensure_session, because reattaching to a stored Copilot session
+        # (state.resumed) means it already holds those turns — replaying them
+        # would duplicate every prior turn in Copilot's context.
+        was_first_turn = not state.has_sent_prompt
         state.system_prompt = system_prompt
         state.model = model
         state.reasoning_effort = reasoning_effort
         state.tools_fingerprint = tools_fp
 
         try:
-            await self._ensure_session(state, model, tools, system_prompt, reasoning_effort)
+            await self._ensure_session(
+                state,
+                model,
+                tools,
+                system_prompt,
+                reasoning_effort,
+                session_id=_copilot_session_id(session_key),
+            )
         except Exception as exc:  # noqa: BLE001 — surfaced as ExecutorError (CancelledError propagates)
             await self.close_session(session_key)
             yield ExecutorError(message=f"Failed to start copilot-sdk session: {exc}")
             return
 
-        prompt = _build_copilot_prompt(messages, is_first_turn=is_first_turn)
+        prompt = _build_copilot_prompt(
+            messages, is_first_turn=was_first_turn and not state.resumed
+        )
         if not prompt:
             yield TurnComplete(response=None)
             return
@@ -655,7 +772,7 @@ class CopilotExecutor(Executor):
 
         unsubscribe = session.on(_on_event)
         send_task: asyncio.Task[Any] = asyncio.ensure_future(  # type: ignore[explicit-any]
-            session.send_and_wait(prompt, timeout=_SEND_TIMEOUT_S)
+            session.send_and_wait(prompt, timeout=_SEND_TIMEOUT_S, agent_mode=agent_mode)
         )
 
         response_text = ""
