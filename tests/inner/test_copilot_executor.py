@@ -13,6 +13,7 @@ gated e2e test.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import sys
 import types
@@ -35,6 +36,7 @@ from omnigent.inner.copilot_executor import (
     _event_data,
     _finalize_usage,
     _permission_policy_input,
+    _quiet_sdk_resume_miss,
     _resolve_agent_mode,
     _resolve_model,
     _resolve_reasoning_effort,
@@ -1510,3 +1512,23 @@ async def test_agent_mode_rides_the_send_without_recreating_the_session(
     # One session across the mode switch.
     assert len(state["create_kwargs"]) == 1
     await ex.close()
+
+
+def test_quiet_sdk_resume_miss_mutes_and_restores_sdk_loggers() -> None:
+    """The expected first-turn probe must not log a scary SDK traceback."""
+    client_logger = logging.getLogger("copilot.client")
+    rpc_logger = logging.getLogger("copilot._jsonrpc")
+    client_logger.setLevel(logging.DEBUG)
+    rpc_logger.setLevel(logging.WARNING)
+    try:
+        with _quiet_sdk_resume_miss():
+            # Both spellings the SDK logs the "Session not found" warning from.
+            assert not client_logger.isEnabledFor(logging.WARNING)
+            assert not rpc_logger.isEnabledFor(logging.WARNING)
+        # Prior levels are restored, so real failures still surface.
+        assert client_logger.level == logging.DEBUG
+        assert rpc_logger.level == logging.WARNING
+    finally:
+        client_logger.setLevel(logging.NOTSET)
+        rpc_logger.setLevel(logging.NOTSET)
+        logging.getLogger("copilot").setLevel(logging.NOTSET)

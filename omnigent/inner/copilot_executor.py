@@ -57,11 +57,12 @@ Requirements:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol, TypeAlias, cast
@@ -184,6 +185,29 @@ _COLLABORATION_MODE_TO_AGENT_MODE: dict[str, CopilotAgentMode] = {
     "default": "interactive",
     "plan": "plan",
 }
+
+
+@contextlib.contextmanager
+def _quiet_sdk_resume_miss() -> Iterator[None]:
+    """Silence the SDK's warnings for an expected "no stored session" probe.
+
+    ``resume_session`` logs a WARNING with a full JSON-RPC traceback — from both
+    ``copilot.client`` and ``copilot._jsonrpc`` — when the id is unknown, which
+    is the normal first turn of every conversation since Omnigent probes before
+    creating. Left alone it puts a scary ``Session not found`` stack in the
+    runner log for every new chat. Each logger is muted explicitly (rather than
+    only their ``copilot`` parent) because the SDK sets levels on them directly,
+    which would shadow a parent-only mute.
+    """
+    muted = [logging.getLogger(name) for name in ("copilot", "copilot.client", "copilot._jsonrpc")]
+    previous = [sdk_logger.level for sdk_logger in muted]
+    for sdk_logger in muted:
+        sdk_logger.setLevel(logging.ERROR)
+    try:
+        yield
+    finally:
+        for sdk_logger, level in zip(muted, previous, strict=True):
+            sdk_logger.setLevel(level)
 
 
 def _copilot_session_id(session_key: str) -> str:
@@ -670,7 +694,8 @@ class CopilotExecutor(Executor):
                 # conversation's turns. A missing/unreadable session is the
                 # normal first-turn case, so failure falls through to create.
                 try:
-                    session = await client.resume_session(session_id, **session_kwargs)
+                    with _quiet_sdk_resume_miss():
+                        session = await client.resume_session(session_id, **session_kwargs)
                     state.resumed = True
                 except Exception as exc:  # noqa: BLE001 — no stored session yet
                     logger.debug(
