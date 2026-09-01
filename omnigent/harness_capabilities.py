@@ -39,6 +39,7 @@ class Elicitation(str, Enum):
     JSONRPC = "jsonrpc"  # app-server JSON-RPC elicitation (codex)
     APPROVAL_MIRROR = "approval-mirror"  # poll the TUI approval pane, mirror to web
     SSE_PERMISSION = "sse-permission"  # permission events over SSE / ACP elicit
+    SDK_CALLBACK = "sdk-callback"  # vendor SDK awaits an in-process permission callback
 
 
 class Resume(str, Enum):

@@ -30,7 +30,7 @@ from omnigent.harness_plugins import (
     native_agents,
     valid_harnesses,
 )
-from omnigent.inner import copilot_executor
+from omnigent.inner import copilot_executor, cursor_executor
 from omnigent.inner.devin import DEVIN_ACP_EXTENSION
 from omnigent.model_override import (
     _ANTIGRAVITY_FAMILY_HARNESSES,
@@ -102,6 +102,28 @@ def test_subagents_matches_its_implementing_mechanism() -> None:
     for harness, capability in harness_capabilities().items():
         expected = harness in subagent_capable
         assert capability.subagents == expected, harness
+
+
+def test_sdk_callback_elicitation_matches_the_executors_that_implement_it() -> None:
+    """``SDK_CALLBACK`` names a real in-process permission callback.
+
+    Both SDK harnesses that declare it hand their vendor SDK an
+    ``on_permission_request``-style callback which the executor answers by
+    running the policy gate and then the web approval card — so an ASK really
+    does reach the UI, unlike ``Elicitation.NONE``. The bridge the runtime
+    adapter installs is the ``_elicitation_handler`` attribute, so asserting the
+    executors still expose it keeps the declared value honest: drop the bridge
+    and this fails.
+    """
+    caps = harness_capabilities()
+    executors = {
+        "copilot": copilot_executor.CopilotExecutor(),
+        "cursor": cursor_executor.CursorExecutor(),
+    }
+    for harness, executor in executors.items():
+        assert caps[harness].elicitation is Elicitation.SDK_CALLBACK, harness
+        assert caps[harness].as_dict()["elicitation"] == "sdk-callback", harness
+        assert hasattr(executor, "_elicitation_handler"), harness
 
 
 def test_native_harnesses_resume_warm() -> None:

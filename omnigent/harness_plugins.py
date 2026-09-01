@@ -555,7 +555,9 @@ _BUILTIN_CAPABILITIES: dict[str, HarnessCapabilities] = {
     ),
     "cursor": _C(
         _IM.SDK_IN_PROCESS,
-        _EL.NONE,
+        # Same in-process permission callback as copilot (the shape the copilot
+        # executor was written for parity with).
+        _EL.SDK_CALLBACK,
         _RS.WARM_REATTACH,
         _EF.NONE,
         _MF.MULTI,
@@ -642,7 +644,9 @@ _BUILTIN_CAPABILITIES: dict[str, HarnessCapabilities] = {
     ),
     "copilot": _C(
         _IM.SDK_IN_PROCESS,
-        _EL.NONE,
+        # create_session(on_permission_request=...) awaits the executor's
+        # handler, which runs the policy gate and then the web approval card.
+        _EL.SDK_CALLBACK,
         # The SDK owns a durable session store keyed by the id Omnigent derives
         # from the conversation (copilot_executor._copilot_session_id), so a new
         # runner process reattaches to Copilot's own session instead of
