@@ -40,6 +40,8 @@ from omnigent.inner.copilot_executor import (
     _resolve_agent_mode,
     _resolve_model,
     _resolve_reasoning_effort,
+    _subagent_summary,
+    _subagent_title,
 )
 from omnigent.inner.executor import (
     CompactionComplete,
@@ -47,6 +49,8 @@ from omnigent.inner.executor import (
     ExecutorError,
     Message,
     ReasoningChunk,
+    SubAgentCompleted,
+    SubAgentStarted,
     TextChunk,
     ToolCallComplete,
     ToolCallRequest,
@@ -1532,3 +1536,113 @@ def test_quiet_sdk_resume_miss_mutes_and_restores_sdk_loggers() -> None:
         client_logger.setLevel(logging.NOTSET)
         rpc_logger.setLevel(logging.NOTSET)
         logging.getLogger("copilot").setLevel(logging.NOTSET)
+
+
+# ---------------------------------------------------------------------------
+# Sub-agents
+# ---------------------------------------------------------------------------
+
+
+def test_subagent_title_prefers_display_name_then_falls_back() -> None:
+    assert _subagent_title({"agentDisplayName": "Code Reviewer", "agentName": "review"}) == (
+        "Code Reviewer"
+    )
+    assert _subagent_title({"agentName": "review"}) == "review"
+    assert _subagent_title({"agentDisplayName": "  "}) == "sub-agent"
+    assert _subagent_title({}) == "sub-agent"
+
+
+def test_subagent_summary_reports_only_known_counters() -> None:
+    assert _subagent_summary({"totalToolCalls": 7, "totalTokens": 12003}) == (
+        "7 tool calls · 12,003 tokens"
+    )
+    assert _subagent_summary({"totalToolCalls": 1}) == "1 tool call"
+    # Nothing invented when Copilot reported no counters.
+    assert _subagent_summary({}) == ""
+
+
+@pytest.mark.asyncio
+async def test_run_turn_maps_subagent_lifecycle_to_child_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_copilot(
+        monkeypatch,
+        [
+            [
+                _ev(
+                    "SUBAGENT_STARTED",
+                    toolCallId="call-1",
+                    agentDisplayName="Code Reviewer",
+                    agentName="review",
+                    agentDescription="Review the diff",
+                ),
+                _ev(
+                    "SUBAGENT_COMPLETED",
+                    toolCallId="call-1",
+                    agentDisplayName="Code Reviewer",
+                    agentName="review",
+                    totalToolCalls=3,
+                    totalTokens=900,
+                ),
+                _ev("ASSISTANT_MESSAGE", content="done"),
+            ]
+        ],
+    )
+    ex = CopilotExecutor(github_token="gho_x")
+    events = [e async for e in ex.run_turn([_user("delegate it")], [], "SYS")]
+    started = [e for e in events if isinstance(e, SubAgentStarted)]
+    completed = [e for e in events if isinstance(e, SubAgentCompleted)]
+    assert len(started) == 1
+    assert started[0].child_key == "call-1"
+    assert started[0].title == "Code Reviewer"
+    assert started[0].task == "Review the diff"
+    assert len(completed) == 1
+    assert completed[0].child_key == "call-1"
+    assert completed[0].ok is True
+    assert completed[0].summary == "3 tool calls · 900 tokens"
+    await ex.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_subagent_completes_with_the_error_as_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_copilot(
+        monkeypatch,
+        [
+            [
+                _ev("SUBAGENT_STARTED", toolCallId="call-9", agentName="review"),
+                _ev("SUBAGENT_FAILED", toolCallId="call-9", agentName="review", error="boom"),
+                _ev("ASSISTANT_MESSAGE", content="recovered"),
+            ]
+        ],
+    )
+    ex = CopilotExecutor(github_token="gho_x")
+    events = [e async for e in ex.run_turn([_user("delegate it")], [], "SYS")]
+    completed = [e for e in events if isinstance(e, SubAgentCompleted)]
+    # A failed sub-agent still closes its child row, marked not-ok.
+    assert len(completed) == 1
+    assert completed[0].child_key == "call-9"
+    assert completed[0].ok is False
+    assert completed[0].summary == "boom"
+    await ex.close()
+
+
+@pytest.mark.asyncio
+async def test_subagent_event_without_a_correlation_id_is_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No toolCallId means no stable child_key, so no unlinkable child row."""
+    _install_fake_copilot(
+        monkeypatch,
+        [
+            [
+                _ev("SUBAGENT_STARTED", agentName="review"),
+                _ev("ASSISTANT_MESSAGE", content="done"),
+            ]
+        ],
+    )
+    ex = CopilotExecutor(github_token="gho_x")
+    events = [e async for e in ex.run_turn([_user("go")], [], "SYS")]
+    assert [e for e in events if isinstance(e, SubAgentStarted)] == []
+    await ex.close()

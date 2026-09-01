@@ -651,7 +651,10 @@ _BUILTIN_CAPABILITIES: dict[str, HarnessCapabilities] = {
         _EF.COPILOT,
         _MF.MULTI,
         _AU.OWN_AUTH,
-        subagents=False,
+        # Copilot reports its own sub-agent lifecycle (SUBAGENT_STARTED /
+        # _COMPLETED / _FAILED), which the executor maps onto SubAgentStarted /
+        # SubAgentCompleted so each one gets an Omnigent child session.
+        subagents=True,
         interrupt=True,
         streaming=True,
         instruction_delivery=_ID.COMPOSED_PER_TURN,

@@ -79,6 +79,8 @@ from .executor import (
     ExecutorEvent,
     Message,
     ReasoningChunk,
+    SubAgentCompleted,
+    SubAgentStarted,
     TextChunk,
     ToolCallComplete,
     ToolCallRequest,
@@ -168,6 +170,15 @@ def _resolve_reasoning_effort(config: ExecutorConfig | None) -> str | None:
         logger.warning("Ignoring unsupported copilot reasoning effort: %r", raw_effort)
         return None
 
+
+# Whether this executor turns the vendor's sub-agents into Omnigent child
+# sessions. Copilot reports its own sub-agent lifecycle (SUBAGENT_STARTED /
+# _COMPLETED / _FAILED), which run_turn maps onto the harness-agnostic
+# SubAgentStarted / SubAgentCompleted events the executor adapter already
+# forwards as ``subagent.*``. Read by the capability-matrix invariant test so
+# the declared ``subagents`` capability cannot drift from what this code does
+# (the same role AcpExtension.surfaces_subagents plays for the ACP harnesses).
+SURFACES_SUBAGENTS = True
 
 # Namespace for deriving a stable Copilot session id from an Omnigent
 # conversation id. Fixed so the same conversation maps to the same Copilot
@@ -260,6 +271,42 @@ def _resolve_agent_mode(config: ExecutorConfig | None) -> CopilotAgentMode | Non
         logger.warning("Ignoring unsupported copilot agent mode: %r", raw)
         return None
     return cast(CopilotAgentMode, mode)
+
+
+def _subagent_title(data: dict[str, Any]) -> str:  # type: ignore[explicit-any]
+    """Return the child-row label for a Copilot sub-agent event.
+
+    Prefers Copilot's own display name, falling back to the internal agent name
+    and finally a generic label — the row must always be nameable.
+
+    :param data: The event's wire ``data`` payload (camelCase keys).
+    :returns: A short label, e.g. ``"Code Reviewer"``.
+    """
+    for key in ("agentDisplayName", "agentName"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return "sub-agent"
+
+
+def _subagent_summary(data: dict[str, Any]) -> str:  # type: ignore[explicit-any]
+    """Return a factual closing line for a completed Copilot sub-agent.
+
+    Copilot reports no closing text, only counters, so the summary states what
+    is actually known (tool calls / tokens) rather than inventing prose. Empty
+    when the event carried no counters at all.
+
+    :param data: The event's wire ``data`` payload (camelCase keys).
+    :returns: e.g. ``"7 tool calls · 12,003 tokens"``, or ``""``.
+    """
+    parts: list[str] = []
+    calls = data.get("totalToolCalls")
+    if isinstance(calls, int):
+        parts.append(f"{calls} tool call{'' if calls == 1 else 's'}")
+    tokens = data.get("totalTokens")
+    if isinstance(tokens, int):
+        parts.append(f"{tokens:,} tokens")
+    return " · ".join(parts)
 
 
 def _tools_fingerprint(tools: list[ToolSpec]) -> str:
@@ -408,6 +455,9 @@ class _CopilotSessionState:
     # call_id -> tool name, populated on TOOL_EXECUTION_START so the matching
     # TOOL_EXECUTION_COMPLETE (which carries only the id) can name its tool.
     call_names: dict[str, str] = field(default_factory=dict)
+    # Copilot sub-agent tool_call_id -> child row title, held for the lifetime
+    # of the sub-agent (started -> completed/failed).
+    subagent_titles: dict[str, str] = field(default_factory=dict)
 
 
 class CopilotExecutor(Executor):
@@ -867,6 +917,35 @@ class CopilotExecutor(Executor):
                     error=error,
                     metadata={"call_id": call_id},
                 )
+            elif etype.endswith("SUBAGENT_STARTED"):
+                child_key = str(data.get("toolCallId") or "")
+                if child_key:
+                    state.subagent_titles[child_key] = _subagent_title(data)
+                    yield SubAgentStarted(
+                        child_key=child_key,
+                        title=state.subagent_titles[child_key],
+                        task=str(data.get("agentDescription") or ""),
+                    )
+            elif etype.endswith("SUBAGENT_COMPLETED"):
+                child_key = str(data.get("toolCallId") or "")
+                if child_key:
+                    state.subagent_titles.pop(child_key, None)
+                    yield SubAgentCompleted(
+                        child_key=child_key,
+                        ok=True,
+                        summary=_subagent_summary(data),
+                    )
+            elif etype.endswith("SUBAGENT_FAILED"):
+                child_key = str(data.get("toolCallId") or "")
+                if child_key:
+                    state.subagent_titles.pop(child_key, None)
+                    # The error IS the summary here: it is the only thing the
+                    # child row can usefully say about a failed sub-agent.
+                    yield SubAgentCompleted(
+                        child_key=child_key,
+                        ok=False,
+                        summary=str(data.get("error") or "sub-agent failed"),
+                    )
             elif etype.endswith("ASSISTANT_USAGE"):
                 usage_model = data.get("model") or usage_model
                 _accumulate_usage(usage_acc, data)

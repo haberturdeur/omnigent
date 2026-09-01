@@ -30,6 +30,7 @@ from omnigent.harness_plugins import (
     native_agents,
     valid_harnesses,
 )
+from omnigent.inner import copilot_executor
 from omnigent.inner.devin import DEVIN_ACP_EXTENSION
 from omnigent.model_override import (
     _ANTIGRAVITY_FAMILY_HARNESSES,
@@ -74,7 +75,7 @@ def test_model_family_matches_model_override_sets() -> None:
 
 
 def test_subagents_matches_its_implementing_mechanism() -> None:
-    """``subagents`` is derivable — from the two mechanisms that implement it.
+    """``subagents`` is derivable — from the three mechanisms that implement it.
 
     1. A **native** agent with a ``subagent_wrapper_label``: Omnigent intercepts
        the vendor's own spawn and mints the child session.
@@ -83,6 +84,11 @@ def test_subagents_matches_its_implementing_mechanism() -> None:
        its own ``_meta``, and the runner mints the child from that. No native
        wrapper label is involved — deliberately, since the child inherits its
        parent's harness identity rather than claiming a vendor's.
+    3. An **SDK executor** that maps a vendor's own sub-agent lifecycle onto the
+       harness-agnostic ``SubAgent*`` executor events
+       (:mod:`omnigent.inner.copilot_executor`), which the executor adapter
+       already forwards as ``subagent.*``. Like the ACP dialect, no wrapper
+       label is involved.
 
     Keeping the derivation here means a harness cannot publish a ``subagents``
     capability on ``/v1/harnesses`` that nothing implements, or implement one it
@@ -91,6 +97,8 @@ def test_subagents_matches_its_implementing_mechanism() -> None:
     subagent_capable = {agent.harness for agent in native_agents() if agent.subagent_wrapper_label}
     if DEVIN_ACP_EXTENSION.surfaces_subagents:
         subagent_capable.add("devin")
+    if copilot_executor.SURFACES_SUBAGENTS:
+        subagent_capable.add("copilot")
     for harness, capability in harness_capabilities().items():
         expected = harness in subagent_capable
         assert capability.subagents == expected, harness
