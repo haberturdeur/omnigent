@@ -21,6 +21,16 @@ Omnigent is an open-source **meta-harness** that gives you a common orchestratio
 
 ---
 
+## Table of Contents
+
+- [Why Omnigent?](#why-omnigent)
+- [Quick start](#quick-start)
+- [Documentation](#documentation)
+- [Troubleshooting](#troubleshooting)
+- [Contributing](#contributing)
+
+---
+
 ## Why Omnigent?
 
 Omnigent lets you:

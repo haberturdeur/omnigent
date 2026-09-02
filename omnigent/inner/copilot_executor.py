@@ -190,6 +190,12 @@ _NO_INTERACTIVE_USER_ANSWER = (
     "No interactive user is available in this Omnigent session. Decide for yourself and continue."
 )
 
+# Permission-request kinds whose worst case is "the agent saw something it
+# should not have" — no mutation, no execution, no egress. Copilot raises a
+# permission request for these too, so they are auto-approved after the policy
+# gate rather than carded: see _on_permission_request for why.
+_LOW_RISK_KINDS: frozenset[str] = frozenset({"read"})
+
 # Namespace for deriving a stable Copilot session id from an Omnigent
 # conversation id. Fixed so the same conversation maps to the same Copilot
 # session across runner restarts and machines — that mapping IS the resume.
@@ -769,18 +775,26 @@ class CopilotExecutor(Executor):
         )
 
         name, args = _permission_policy_input(request)
+        kind = str(getattr(request, "kind", "") or "")
 
         # Stage 1 — hard policy deny: block immediately, no elicitation.
         evaluator = self._policy_evaluator
+        action = ""
         if evaluator is not None:
             verdict = await evaluator("PHASE_TOOL_CALL", {"name": name, "arguments": args})
-            if getattr(verdict, "action", "") == "POLICY_ACTION_DENY":
+            action = str(getattr(verdict, "action", "") or "")
+            if action == "POLICY_ACTION_DENY":
                 reason = getattr(verdict, "reason", "") or "blocked by policy"
                 return PermissionDecisionReject(feedback=f"Denied by Omnigent policy: {reason}")
 
-        # Stage 2 — user elicitation: surface an approval card.
+        # Stage 2 — user elicitation, but only where it buys something. Copilot
+        # asks permission for reads too, so carding every request buries the
+        # destructive ones in a stream of "may I look at this file" prompts and
+        # trains the user to click approve. Reads are still gated by the policy
+        # engine above and by the workspace boundary; an explicit policy ASK
+        # prompts even for a read, so a deployment that wants that can have it.
         handler = self._elicitation_handler
-        if handler is not None:
+        if handler is not None and (action == "POLICY_ACTION_ASK" or kind not in _LOW_RISK_KINDS):
             approved = await handler(name, args)
             if not approved:
                 return PermissionDecisionReject(feedback="Denied via Omnigent approval UI")

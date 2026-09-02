@@ -1939,3 +1939,78 @@ async def test_skills_none_filter_disables_them(
     _ = [e async for e in ex.run_turn([_user("go")], [], "SYS")]
     assert state["create_kwargs"][0]["enable_skills"] is False
     await ex.close()
+
+
+# ---------------------------------------------------------------------------
+# Risk-differentiated permission gate
+# ---------------------------------------------------------------------------
+
+
+class _Req:
+    """A Copilot permission request variant (identified by its ``kind``)."""
+
+    def __init__(self, kind: str) -> None:
+        self.kind = kind
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"kind": self.kind}
+
+
+class _Verdict:
+    def __init__(self, action: str) -> None:
+        self.action = action
+        self.reason = "because"
+
+
+def _copilot_with_bridges(monkeypatch: pytest.MonkeyPatch, *, action: str | None):
+    _install_fake_copilot(monkeypatch)
+    ex = CopilotExecutor(github_token="gho_x")
+    asked: list[str] = []
+
+    async def _elicit(name: str, args: dict[str, Any]) -> bool:
+        asked.append(name)
+        return True
+
+    ex._elicitation_handler = _elicit
+    if action is not None:
+
+        async def _policy(phase: str, data: dict[str, Any]) -> _Verdict:
+            return _Verdict(action)
+
+        ex._policy_evaluator = _policy
+    return ex, asked
+
+
+@pytest.mark.asyncio
+async def test_a_read_is_not_carded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reads are policy-gated but not prompted — carding them trains click-through."""
+    ex, asked = _copilot_with_bridges(monkeypatch, action="POLICY_ACTION_ALLOW")
+    decision = await ex._on_permission_request(_Req("read"), {})
+    assert type(decision).__name__ == "_ApproveOnce"
+    assert asked == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["write", "shell", "url", "mcp", "custom-tool"])
+async def test_mutating_and_egress_kinds_are_still_carded(
+    monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    ex, asked = _copilot_with_bridges(monkeypatch, action="POLICY_ACTION_ALLOW")
+    await ex._on_permission_request(_Req(kind), {})
+    assert asked == [kind]
+
+
+@pytest.mark.asyncio
+async def test_policy_ask_prompts_even_for_a_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A deployment that wants read prompts gets them by saying ASK."""
+    ex, asked = _copilot_with_bridges(monkeypatch, action="POLICY_ACTION_ASK")
+    await ex._on_permission_request(_Req("read"), {})
+    assert asked == ["read"]
+
+
+@pytest.mark.asyncio
+async def test_policy_deny_still_blocks_a_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    ex, asked = _copilot_with_bridges(monkeypatch, action="POLICY_ACTION_DENY")
+    decision = await ex._on_permission_request(_Req("read"), {})
+    assert type(decision).__name__ == "_Reject"
+    assert asked == []
