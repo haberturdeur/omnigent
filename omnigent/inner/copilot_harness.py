@@ -32,8 +32,11 @@ Env vars read at startup:
 - ``HARNESS_COPILOT_OS_ENV``: JSON-encoded :class:`OSEnvSpec` (its ``cwd`` is
   used when ``HARNESS_COPILOT_CWD`` is unset). Defaults to
   ``caller_process + sandbox=none``.
-- ``HARNESS_COPILOT_SKILLS_FILTER``: JSON ``str | list[str]`` (parity;
-  copilot has no skill mechanism wired here). Defaults to ``"all"``.
+- ``HARNESS_COPILOT_SKILLS_FILTER``: JSON ``str | list[str]`` selecting which
+  skills the session loads. ``"none"`` disables skill loading; anything else
+  loads the agent bundle's ``skills/`` then the host's ``~/.copilot/skills``
+  (see :func:`omnigent.inner.copilot_executor.copilot_skill_sources`).
+  Defaults to ``"all"``.
 - ``HARNESS_COPILOT_BUNDLE_DIR`` / ``HARNESS_COPILOT_AGENT_NAME``:
   reserved for future use.
 """

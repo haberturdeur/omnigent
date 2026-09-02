@@ -19,6 +19,7 @@ import sys
 import types
 import uuid
 from collections.abc import Iterable
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -41,8 +42,10 @@ from omnigent.inner.copilot_executor import (
     _resolve_agent_mode,
     _resolve_model,
     _resolve_reasoning_effort,
+    _skill_session_kwargs,
     _subagent_summary,
     _subagent_title,
+    copilot_skill_sources,
 )
 from omnigent.inner.executor import (
     CompactionComplete,
@@ -1876,4 +1879,63 @@ async def test_empty_steering_message_is_declined(monkeypatch: pytest.MonkeyPatc
     _ = [e async for e in ex.run_turn([_user("go")], [], "SYS")]
     assert await ex.enqueue_session_message("conv1", "   ") is False
     assert state["enqueued"] == []
+    await ex.close()
+
+
+# ---------------------------------------------------------------------------
+# Skills
+# ---------------------------------------------------------------------------
+
+
+def test_copilot_skill_sources_prefers_bundle_over_host(tmp_path: Path) -> None:
+    bundle = tmp_path / "bundle"
+    (bundle / "skills").mkdir(parents=True)
+    home = tmp_path / "home"
+    (home / ".copilot" / "skills").mkdir(parents=True)
+    assert copilot_skill_sources(bundle, home) == [bundle / "skills", home / ".copilot" / "skills"]
+    # Missing roots are dropped, not passed to the SDK as dead paths.
+    assert copilot_skill_sources(None, home) == [home / ".copilot" / "skills"]
+    assert copilot_skill_sources(None, tmp_path / "empty") == []
+
+
+def test_skill_session_kwargs_disables_loading_when_nothing_to_load(tmp_path: Path) -> None:
+    # "none" must disable outright: an empty directory list reads as "defaults".
+    assert _skill_session_kwargs("none", [tmp_path]) == {"enable_skills": False}
+    assert _skill_session_kwargs("all", []) == {"enable_skills": False}
+
+
+def test_skill_session_kwargs_passes_roots_for_all_and_named_filters(tmp_path: Path) -> None:
+    kwargs = _skill_session_kwargs("all", [tmp_path])
+    assert kwargs == {"enable_skills": True, "skill_directories": [str(tmp_path)]}
+    # A named subset can't be expressed as directories, so the roots load and
+    # Copilot resolves names — advisory, never silently dropping skills.
+    assert _skill_session_kwargs(["fusion"], [tmp_path]) == kwargs
+
+
+@pytest.mark.asyncio
+async def test_session_is_created_with_bundle_skills(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    bundle = tmp_path / "bundle"
+    (bundle / "skills").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "nohome"))
+    state = _install_fake_copilot(monkeypatch, [[_ev("ASSISTANT_MESSAGE", content="ok")]])
+    ex = CopilotExecutor(github_token="gho_x", bundle_dir=bundle)
+    _ = [e async for e in ex.run_turn([_user("go")], [], "SYS")]
+    kwargs = state["create_kwargs"][0]
+    assert kwargs["enable_skills"] is True
+    assert kwargs["skill_directories"] == [str(bundle / "skills")]
+    await ex.close()
+
+
+@pytest.mark.asyncio
+async def test_skills_none_filter_disables_them(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    bundle = tmp_path / "bundle"
+    (bundle / "skills").mkdir(parents=True)
+    state = _install_fake_copilot(monkeypatch, [[_ev("ASSISTANT_MESSAGE", content="ok")]])
+    ex = CopilotExecutor(github_token="gho_x", bundle_dir=bundle, skills_filter="none")
+    _ = [e async for e in ex.run_turn([_user("go")], [], "SYS")]
+    assert state["create_kwargs"][0]["enable_skills"] is False
     await ex.close()

@@ -283,6 +283,48 @@ def _resolve_agent_mode(config: ExecutorConfig | None) -> CopilotAgentMode | Non
     return cast(CopilotAgentMode, mode)
 
 
+def copilot_skill_sources(bundle_dir: Path | None, home: Path) -> list[Path]:
+    """Return the ordered skill-dir roots a Copilot session should load.
+
+    Mirrors :func:`omnigent.inner.codex_executor.codex_skill_sources`: the
+    agent's own ``<bundle>/skills/`` first so a bundled skill shadows a host one
+    of the same name, then the host's ``<home>/.copilot/skills/``. Only existing
+    directories are returned — a missing path is noise the SDK would carry.
+
+    :param bundle_dir: Materialized agent-bundle root, or ``None``.
+    :param home: The user home directory; injected so tests can pin it.
+    :returns: Existing skill-dir roots in priority order.
+    """
+    sources: list[Path] = []
+    if bundle_dir is not None and (bundle_dir / "skills").is_dir():
+        sources.append(bundle_dir / "skills")
+    host = home / ".copilot" / "skills"
+    if host.is_dir():
+        sources.append(host)
+    return sources
+
+
+def _skill_session_kwargs(
+    skills_filter: str | list[str],
+    sources: list[Path],
+) -> dict[str, Any]:  # type: ignore[explicit-any]
+    """Return the ``create_session`` kwargs that load *sources* as skills.
+
+    ``"none"`` disables skill loading outright rather than passing an empty
+    directory list, which the SDK reads as "load the defaults". A named subset
+    cannot be expressed — the SDK takes directories, not skill names — so it
+    loads the same roots and lets Copilot resolve names, keeping the filter
+    advisory instead of silently dropping skills the user asked for.
+
+    :param skills_filter: ``"all"``, ``"none"``, or a list of skill names.
+    :param sources: Ordered skill-dir roots.
+    :returns: Kwargs to merge into ``create_session``.
+    """
+    if skills_filter == "none" or not sources:
+        return {"enable_skills": False}
+    return {"enable_skills": True, "skill_directories": [str(path) for path in sources]}
+
+
 def _subagent_title(data: dict[str, Any]) -> str:  # type: ignore[explicit-any]
     """Return the child-row label for a Copilot sub-agent event.
 
@@ -918,6 +960,13 @@ class CopilotExecutor(Executor):
                 "on_user_input_request": self._on_user_input,
                 "working_directory": cwd,
                 "reasoning_effort": reasoning_effort or None,
+                # Omnigent's skills (the agent bundle's, then the host's) —
+                # parity with the codex/claude harnesses, which link the same
+                # two roots into the vendor's skill dir.
+                **_skill_session_kwargs(
+                    self._skills_filter,
+                    copilot_skill_sources(self._bundle_dir, Path.home()),
+                ),
             }
             session = None
             if session_id:
