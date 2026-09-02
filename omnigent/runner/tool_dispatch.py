@@ -110,6 +110,7 @@ from omnigent.tools.builtins.timer import (
     # schema advertises.
     validate_timer_set_args,
 )
+from omnigent.tools.builtins.todos import TODO_STATUSES, SysTodoWriteTool
 from omnigent.tools.builtins.update_comment import UpdateCommentTool
 from omnigent.tools.builtins.upload_file import UploadFileTool, safe_resolve
 
@@ -299,6 +300,11 @@ _SESSION_QUERY_TOOLS = frozenset(
 )
 
 _SESSION_SELF_WRITE_TOOLS = frozenset({SysSessionRenameTool.name()})
+
+# Priority 5l.2: the agent's own todo list. Posted as the same
+# ``external_session_todos`` event the native forwarders scrape out of a TUI,
+# so the panel does not care which mechanism filled it.
+_SESSION_TODO_TOOLS = frozenset({SysTodoWriteTool.name()})
 
 # Grantee sentinel for an anonymous, public read-only share. Mirrors the
 # server's RESERVED_USER_PUBLIC; only specs with
@@ -555,6 +561,7 @@ def build_native_relay_tool_schemas(spec: AgentSpec | None) -> list[_JsonObject]
             SysSessionGetHistoryTool,
             SysSessionGetInfoTool,
             SysSessionRenameTool,
+            SysTodoWriteTool,
             SysAgentGetTool,
             SysAgentListTool,
             SysAgentDownloadTool,
@@ -5170,6 +5177,77 @@ async def _session_list_via_rest(
     )
 
 
+async def _publish_session_todos_via_rest(
+    args: _JsonObject,
+    conversation_id: str | None,
+    server_client: httpx.AsyncClient | None,
+) -> str:
+    """Publish the agent's todo list through the session events API.
+
+    Posts the same ``external_session_todos`` event the native forwarders send
+    after scraping a vendor TUI, so the web panel is fed identically whether the
+    list came from a tool call or a terminal.
+
+    A todo list is progress metadata, never a prerequisite for the user's turn,
+    so every failure becomes a tool-result envelope rather than an exception
+    (same posture as ``sys_session_rename``).
+
+    :param args: Tool arguments; ``todos`` is the complete replacement list.
+    :param conversation_id: The calling session, or ``None`` outside one.
+    :param server_client: Runner's server client, or ``None`` when unavailable.
+    :returns: A JSON tool-result string.
+    """
+    if server_client is None:
+        return json.dumps({"error": "sys_todo_write requires server access"})
+    if conversation_id is None:
+        return json.dumps({"error": "sys_todo_write requires a session id"})
+    raw_todos = args.get("todos")
+    if not isinstance(raw_todos, list):
+        return json.dumps({"error": "sys_todo_write requires a 'todos' array"})
+    todos: list[dict[str, str]] = []
+    for entry in raw_todos:
+        if not isinstance(entry, dict):
+            return json.dumps({"error": "each todo must be an object"})
+        content = entry.get("content")
+        status = entry.get("status")
+        if not isinstance(content, str) or not content.strip():
+            return json.dumps({"error": "each todo needs a non-empty 'content'"})
+        if status not in TODO_STATUSES:
+            return json.dumps(
+                {"error": f"todo 'status' must be one of {', '.join(TODO_STATUSES)}"}
+            )
+        active_form = entry.get("activeForm")
+        todos.append(
+            {
+                "content": content.strip(),
+                "status": status,
+                # The panel shows this while a step runs; falling back to the
+                # content keeps a row from rendering blank.
+                "activeForm": (
+                    active_form.strip()
+                    if isinstance(active_form, str) and active_form.strip()
+                    else content.strip()
+                ),
+            }
+        )
+    try:
+        response = await server_client.post(
+            f"/v1/sessions/{conversation_id}/events",
+            json={"type": "external_session_todos", "data": {"todos": todos}},
+            timeout=30.0,
+        )
+    except Exception as exc:  # noqa: BLE001 — metadata must not abort the turn
+        return json.dumps({"error": f"sys_todo_write failed: {exc}"})
+    if response.status_code >= 400:
+        return json.dumps(
+            {
+                "error": f"sys_todo_write returned {response.status_code}",
+                "detail": response.text[:200],
+            }
+        )
+    return json.dumps({"ok": True, "count": len(todos)})
+
+
 async def _rename_current_session_via_rest(
     args: _JsonObject,
     conversation_id: str | None,
@@ -5848,6 +5926,12 @@ async def execute_tool(
             )
         elif tool_name in _SESSION_SELF_WRITE_TOOLS:
             output = await _rename_current_session_via_rest(
+                args,
+                conversation_id,
+                server_client,
+            )
+        elif tool_name in _SESSION_TODO_TOOLS:
+            output = await _publish_session_todos_via_rest(
                 args,
                 conversation_id,
                 server_client,
