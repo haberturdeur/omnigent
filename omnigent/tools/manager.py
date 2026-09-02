@@ -44,6 +44,7 @@ from omnigent.tools.builtins import (
     SysSessionShareTool,
     SysTimerCancelTool,
     SysTimerSetTool,
+    SysTodoWriteTool,
     UpdateCommentTool,
     any_skill_has_resources,
     get_builtin_tool,
@@ -498,8 +499,16 @@ class ToolManager:
             self._tools[SysSessionCreateTool.name()] = SysSessionCreateTool()
 
     def _register_session_tools(self) -> None:
-        """Register framework-owned tools for the current session."""
+        """Register framework-owned tools for the current session.
+
+        Both are session self-writes every agent gets: naming the session, and
+        publishing the todo list the web panel renders. The todo list is
+        framework surface rather than an opt-in capability for the same reason
+        the rename is — an agent should not have to be configured before the
+        user can see what it is working through.
+        """
         self._tools[SysSessionRenameTool.name()] = SysSessionRenameTool()
+        self._tools[SysTodoWriteTool.name()] = SysTodoWriteTool()
 
     def _register_agent_mgmt_tools(self) -> None:
         """

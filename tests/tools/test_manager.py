@@ -64,6 +64,10 @@ _ALWAYS_PRESENT_TOOLS: frozenset[str] = frozenset(
         "sys_session_list",
         "sys_session_get_info",
         "sys_session_rename",
+        # Publishing the todo list is framework surface for the same reason
+        # the rename is: the user should see what the agent is working
+        # through without the spec opting in.
+        "sys_todo_write",
         # Read-only agent discovery tools are likewise always available
         # (global, permission-bounded reads of any accessible session's
         # agent / bundle).
@@ -124,6 +128,13 @@ def test_session_rename_is_registered_for_every_agent() -> None:
     names = {schema["function"]["name"] for schema in ToolManager(_make_spec()).get_tool_schemas()}
 
     assert "sys_session_rename" in names
+
+
+def test_todo_write_is_registered_for_every_agent() -> None:
+    """The todo panel must work without the spec opting in to anything."""
+    names = {schema["function"]["name"] for schema in ToolManager(_make_spec()).get_tool_schemas()}
+
+    assert "sys_todo_write" in names
 
 
 @pytest.fixture()

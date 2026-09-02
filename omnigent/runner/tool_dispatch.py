@@ -460,6 +460,10 @@ _NATIVE_RELAY_BUILTIN_TOOLS = (
     _COMMENT_TOOLS
     | _SESSION_QUERY_TOOLS
     | _SESSION_SELF_WRITE_TOOLS
+    # The todo panel is fed by this tool for every harness (a native TUI's own
+    # task list reaches it through a forwarder instead), so it must ride the
+    # relay or native sessions could never fill it.
+    | _SESSION_TODO_TOOLS
     | _ASYNC_INBOX_TOOLS
     | _SUBAGENT_TOOLS
     | _LIST_MODELS_TOOLS
