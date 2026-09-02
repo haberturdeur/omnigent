@@ -62,7 +62,7 @@ import json
 import logging
 import os
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol, TypeAlias, cast
@@ -180,6 +180,14 @@ def _resolve_reasoning_effort(config: ExecutorConfig | None) -> str | None:
 # the declared ``subagents`` capability cannot drift from what this code does
 # (the same role AcpExtension.surfaces_subagents plays for the ACP harnesses).
 SURFACES_SUBAGENTS = True
+
+# Answer given to a question the approval card cannot collect (a freeform
+# ask_user, or a choice question with no bridge wired). Says plainly that the
+# turn is not interactive so the agent proceeds on its own judgement instead of
+# waiting on a person who will never reply.
+_NO_INTERACTIVE_USER_ANSWER = (
+    "No interactive user is available in this Omnigent session. Decide for yourself and continue."
+)
 
 # Namespace for deriving a stable Copilot session id from an Omnigent
 # conversation id. Fixed so the same conversation maps to the same Copilot
@@ -518,6 +526,13 @@ class CopilotExecutor(Executor):
         self._elicitation_handler: Callable[[str, dict[str, object]], Awaitable[bool]] | None = (
             None
         )
+        # Installed by the runtime adapter (only on executors that declare it):
+        # renders an approval card whose buttons are the labels we pass, and
+        # returns the chosen one. Used for the plan-mode exit and for Copilot's
+        # ask_user tool, both of which are choices rather than yes/no.
+        self._elicitation_choice_handler: (
+            Callable[[str, dict[str, object], Sequence[str]], Awaitable[str | None]] | None
+        ) = None
 
     def supports_streaming(self) -> bool:
         return True
@@ -665,6 +680,102 @@ class CopilotExecutor(Executor):
 
         return PermissionDecisionApproveOnce()
 
+    async def _on_exit_plan_mode(
+        self,
+        request: dict[str, Any],  # type: ignore[explicit-any]
+        _invocation: dict[str, str],
+    ) -> dict[str, Any]:  # type: ignore[explicit-any]
+        """Answer Copilot's "the plan is ready, what now?" request.
+
+        Installed as ``create_session(on_exit_plan_mode_request=...)``. Plan mode
+        ends with the agent asking which of its ``actions`` to take; with no
+        handler the SDK waits forever, so a web-driven plan-mode turn would park
+        with a finished plan and no way to accept it.
+
+        The plan's own actions become the buttons on the approval card (via the
+        choice bridge), so the user picks the vendor's real next step rather than
+        a yes/no Omnigent invented. Declining returns ``approved: False``, which
+        keeps the session in plan mode instead of executing.
+
+        With no choice bridge wired (single-process / pre-turn paths) the
+        recommended action is taken, matching how the permission callback
+        approves by default rather than hanging.
+
+        :param request: The SDK's ``ExitPlanModeRequest``.
+        :param _invocation: SDK invocation metadata (unused).
+        :returns: An ``ExitPlanModeResult`` mapping.
+        """
+        summary = str(request.get("summary") or "").strip()
+        recommended = str(request.get("recommendedAction") or "").strip()
+        raw_actions = request.get("actions")
+        actions = (
+            [str(a) for a in raw_actions if str(a).strip()]
+            if isinstance(raw_actions, list)
+            else []
+        )
+        if recommended and recommended not in actions:
+            actions.insert(0, recommended)
+
+        handler = self._elicitation_choice_handler
+        if handler is None or not actions:
+            return {
+                "approved": True,
+                "selectedAction": recommended or (actions[0] if actions else ""),
+            }
+
+        chosen = await handler(
+            "exit plan mode",
+            {"summary": summary, "plan": str(request.get("planContent") or "")},
+            actions,
+        )
+        if chosen is None:
+            return {
+                "approved": False,
+                "feedback": (
+                    "Plan not approved via the Omnigent approval UI; staying in plan mode."
+                ),
+            }
+        return {"approved": True, "selectedAction": chosen}
+
+    async def _on_user_input(
+        self,
+        request: dict[str, Any],  # type: ignore[explicit-any]
+        _invocation: dict[str, str],
+    ) -> dict[str, Any]:  # type: ignore[explicit-any]
+        """Answer Copilot's ``ask_user`` tool from the web approval card.
+
+        Installed as ``create_session(on_user_input_request=...)``. Without it the
+        SDK waits forever on any mid-turn question — the same silent park as an
+        unanswered permission request.
+
+        A question WITH choices maps cleanly onto the choice card. A freeform
+        question does not: the card collects a decision, not prose. Rather than
+        hang, answer that no interactive user is available so the agent decides
+        for itself and the turn finishes — a visibly wrong answer beats a
+        conversation that never returns.
+
+        :param request: The SDK's ``UserInputRequest``.
+        :param _invocation: SDK invocation metadata (unused).
+        :returns: A ``UserInputResponse`` mapping.
+        """
+        question = str(request.get("question") or "").strip()
+        raw_choices = request.get("choices")
+        choices = (
+            [str(c) for c in raw_choices if str(c).strip()]
+            if isinstance(raw_choices, list)
+            else []
+        )
+        handler = self._elicitation_choice_handler
+        if handler is not None and choices:
+            chosen = await handler("ask_user", {"question": question}, choices)
+            if chosen is not None:
+                return {"answer": chosen, "wasFreeform": False}
+            return {
+                "answer": _NO_INTERACTIVE_USER_ANSWER,
+                "wasFreeform": True,
+            }
+        return {"answer": _NO_INTERACTIVE_USER_ANSWER, "wasFreeform": True}
+
     async def _ensure_session(
         self,
         state: _CopilotSessionState,
@@ -736,6 +847,10 @@ class CopilotExecutor(Executor):
                 "system_message": system_message,
                 "tools": self._make_tools(tools) or None,
                 "on_permission_request": self._on_permission_request,
+                # Without these two the SDK waits forever on a finished plan or
+                # a mid-turn question (see the handlers' docstrings).
+                "on_exit_plan_mode_request": self._on_exit_plan_mode,
+                "on_user_input_request": self._on_user_input,
                 "working_directory": cwd,
                 "reasoning_effort": reasoning_effort or None,
             }

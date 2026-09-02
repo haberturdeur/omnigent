@@ -1689,3 +1689,132 @@ async def test_blank_session_title_is_not_suggested(monkeypatch: pytest.MonkeyPa
     titles = [e for e in events if isinstance(e, SessionTitleSuggested)]
     assert [t.title.strip() for t in titles] == [""]
     await ex.close()
+
+
+# ---------------------------------------------------------------------------
+# Plan-mode exit / ask_user  (both park the turn forever when unanswered)
+# ---------------------------------------------------------------------------
+
+
+class _RecordingChoiceHandler:
+    """Stands in for the adapter's choice bridge; records what the card offered."""
+
+    def __init__(self, answer: str | None) -> None:
+        self.answer = answer
+        self.calls: list[tuple[str, dict[str, Any], list[str]]] = []
+
+    async def __call__(
+        self, tool_name: str, tool_input: dict[str, Any], options: Any
+    ) -> str | None:
+        self.calls.append((tool_name, tool_input, list(options)))
+        return self.answer
+
+
+@pytest.mark.asyncio
+async def test_exit_plan_mode_offers_the_plans_own_actions() -> None:
+    handler = _RecordingChoiceHandler("Implement the plan")
+    ex = CopilotExecutor(github_token="gho_x")
+    ex._elicitation_choice_handler = handler
+    result = await ex._on_exit_plan_mode(
+        {
+            "summary": "Refactor auth",
+            "planContent": "1. …",
+            "actions": ["Implement the plan", "Keep planning"],
+            "recommendedAction": "Implement the plan",
+        },
+        {},
+    )
+    assert result == {"approved": True, "selectedAction": "Implement the plan"}
+    # The card's buttons are the vendor's real next steps, not an invented yes/no.
+    tool_name, tool_input, options = handler.calls[0]
+    assert tool_name == "exit plan mode"
+    assert options == ["Implement the plan", "Keep planning"]
+    assert tool_input["summary"] == "Refactor auth"
+
+
+@pytest.mark.asyncio
+async def test_declining_the_plan_keeps_the_session_in_plan_mode() -> None:
+    ex = CopilotExecutor(github_token="gho_x")
+    ex._elicitation_choice_handler = _RecordingChoiceHandler(None)
+    result = await ex._on_exit_plan_mode(
+        {"summary": "Refactor auth", "actions": ["Implement"], "recommendedAction": "Implement"},
+        {},
+    )
+    assert result["approved"] is False
+    assert "plan mode" in result["feedback"]
+
+
+@pytest.mark.asyncio
+async def test_exit_plan_mode_without_a_bridge_takes_the_recommended_action() -> None:
+    """No approval UI (single-process paths) must not hang the plan."""
+    ex = CopilotExecutor(github_token="gho_x")
+    result = await ex._on_exit_plan_mode(
+        {
+            "summary": "s",
+            "actions": ["Implement", "Keep planning"],
+            "recommendedAction": "Implement",
+        },
+        {},
+    )
+    assert result == {"approved": True, "selectedAction": "Implement"}
+
+
+@pytest.mark.asyncio
+async def test_recommended_action_missing_from_actions_is_still_offered() -> None:
+    handler = _RecordingChoiceHandler("Ship it")
+    ex = CopilotExecutor(github_token="gho_x")
+    ex._elicitation_choice_handler = handler
+    await ex._on_exit_plan_mode(
+        {"summary": "s", "actions": ["Keep planning"], "recommendedAction": "Ship it"},
+        {},
+    )
+    assert handler.calls[0][2] == ["Ship it", "Keep planning"]
+
+
+@pytest.mark.asyncio
+async def test_ask_user_with_choices_returns_the_picked_one() -> None:
+    handler = _RecordingChoiceHandler("Postgres")
+    ex = CopilotExecutor(github_token="gho_x")
+    ex._elicitation_choice_handler = handler
+    result = await ex._on_user_input(
+        {"question": "Which database?", "choices": ["Postgres", "SQLite"], "allowFreeform": False},
+        {},
+    )
+    assert result == {"answer": "Postgres", "wasFreeform": False}
+    assert handler.calls[0][0] == "ask_user"
+    assert handler.calls[0][2] == ["Postgres", "SQLite"]
+
+
+@pytest.mark.asyncio
+async def test_freeform_question_is_answered_rather_than_parked() -> None:
+    """The card collects a decision, not prose — so say so instead of hanging."""
+    ex = CopilotExecutor(github_token="gho_x")
+    ex._elicitation_choice_handler = _RecordingChoiceHandler("unused")
+    result = await ex._on_user_input(
+        {"question": "Describe the desired API", "choices": [], "allowFreeform": True},
+        {},
+    )
+    assert result["wasFreeform"] is True
+    assert "No interactive user" in result["answer"]
+
+
+@pytest.mark.asyncio
+async def test_declined_choice_question_still_answers_the_agent() -> None:
+    ex = CopilotExecutor(github_token="gho_x")
+    ex._elicitation_choice_handler = _RecordingChoiceHandler(None)
+    result = await ex._on_user_input({"question": "Which?", "choices": ["a", "b"]}, {})
+    assert "No interactive user" in result["answer"]
+
+
+@pytest.mark.asyncio
+async def test_session_is_created_with_both_stall_guards(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression guard: dropping either kwarg re-introduces a silent park."""
+    state = _install_fake_copilot(monkeypatch, [[_ev("ASSISTANT_MESSAGE", content="ok")]])
+    ex = CopilotExecutor(github_token="gho_x")
+    _ = [e async for e in ex.run_turn([_user("go")], [], "SYS")]
+    kwargs = state["create_kwargs"][0]
+    assert kwargs["on_exit_plan_mode_request"] is not None
+    assert kwargs["on_user_input_request"] is not None
+    await ex.close()

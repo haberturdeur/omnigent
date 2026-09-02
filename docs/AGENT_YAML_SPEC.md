@@ -146,7 +146,10 @@ pure function of the conversation.
 `shell`) rides each message, so switching between planning and executing keeps
 the session and its context. Set it per turn via `extra.agent_mode`, or with
 Omnigent's harness-agnostic `extra.collaboration_mode` (`default` / `plan`,
-the spelling the codex-native Plan-mode toggle already persists).
+the spelling the codex-native Plan-mode toggle already persists). When the
+agent finishes planning it asks which of its own actions to take; that request
+(and Copilot's `ask_user` tool) is answered from the Omnigent approval card,
+with the vendor's actions as the buttons.
 
 ### Kimi Code
 
