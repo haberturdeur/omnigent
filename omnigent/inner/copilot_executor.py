@@ -73,6 +73,7 @@ from omnigent.reasoning_effort import COPILOT_EFFORTS, validate_effort
 from .datamodel import OSEnvSpec
 from .executor import (
     CompactionComplete,
+    EnqueuedContent,
     Executor,
     ExecutorConfig,
     ExecutorError,
@@ -393,6 +394,31 @@ def _build_copilot_prompt(messages: list[Message], *, is_first_turn: bool) -> st
 # ---------------------------------------------------------------------------
 
 
+def _enqueued_content_to_text(content: EnqueuedContent) -> str:
+    """Flatten a steering message's content into the text Copilot accepts.
+
+    ``send`` takes a prompt string, while the queue hands over either a plain
+    string or Responses-style content blocks; only the text parts can be
+    steered (an attachment has no ``send`` equivalent here).
+
+    :param content: A string or a list of content blocks.
+    :returns: The joined text, or ``""`` when there is nothing sayable.
+    """
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict):
+                text = block.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "\n".join(part for part in parts if part.strip()).strip()
+    return ""
+
+
 def _encode_tool_result(result: object) -> object:
     """Encode a bridged-tool result as a :class:`copilot.ToolResult`.
 
@@ -431,6 +457,14 @@ class _CopilotSession(Protocol):
     """
 
     def on(self, handler: Callable[[Any], None]) -> Callable[[], None]:  # type: ignore[explicit-any]
+        pass
+
+    async def send(
+        self,
+        prompt: str,
+        *,
+        mode: Literal["enqueue", "immediate"] | None = None,
+    ) -> str:
         pass
 
     async def send_and_wait(
@@ -547,9 +581,40 @@ class CopilotExecutor(Executor):
         return True
 
     def supports_live_message_queue(self) -> bool:
-        # The SDK exposes no confirmed mid-turn steer wired here, so a message
-        # can't be injected into a running turn.
-        return False
+        # ``send(mode="enqueue")`` hands the running session another message,
+        # which Copilot picks up at its next boundary (and reports through
+        # PENDING_MESSAGES_MODIFIED) — see enqueue_session_message.
+        return True
+
+    async def enqueue_session_message(self, session_key: str, content: EnqueuedContent) -> bool:
+        """Steer a running Copilot turn by queueing another user message.
+
+        The SDK's ``send(mode="enqueue")`` appends to the session's pending
+        messages, which the agent consumes at its next boundary rather than
+        interrupting mid-tool — so steering lands without killing the turn's
+        work. Deliberately not ``"immediate"``: that races the in-flight turn.
+
+        Returns ``False`` (rather than raising) when there is no live session or
+        nothing to say, so the caller falls back to queueing the message for the
+        next turn — the same contract the other steerable executors keep.
+
+        :param session_key: Adapter session key (the Omnigent conversation id).
+        :param content: User-supplied content: a string or content blocks.
+        :returns: ``True`` when Copilot accepted the steering message.
+        """
+        state = self._session_states.get(session_key)
+        session = state.session if state is not None else None
+        if session is None:
+            return False
+        text = _enqueued_content_to_text(content)
+        if not text:
+            return False
+        try:
+            await session.send(text, mode="enqueue")
+        except Exception as exc:  # noqa: BLE001 — steering is best-effort
+            logger.warning("copilot-sdk: steering message not delivered: %s", exc)
+            return False
+        return True
 
     def _session_key(self, messages: list[Message]) -> str:
         if messages:

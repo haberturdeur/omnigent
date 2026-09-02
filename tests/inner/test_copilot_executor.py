@@ -33,6 +33,7 @@ from omnigent.inner.copilot_executor import (
     _coerce_args,
     _copilot_session_id,
     _encode_tool_result,
+    _enqueued_content_to_text,
     _event_data,
     _finalize_usage,
     _permission_policy_input,
@@ -99,6 +100,10 @@ class _FakeSession:
 
         self._state["unsub_calls"] = self._state.get("unsub_calls", 0)
         return _Unsub(self, handler)
+
+    async def send(self, prompt: str, *, mode: str | None = None) -> str:
+        self._state["enqueued"].append((prompt, mode))
+        return "msg-1"
 
     async def send_and_wait(
         self, prompt: str, *, timeout: float = 60.0, agent_mode: str | None = None
@@ -172,6 +177,7 @@ def _install_fake_copilot(
         "turn_scripts": list(turn_scripts or []),
         "send_exc_remaining": send_exc_times if send_exc is not None else 0,
         "sent_agent_modes": [],
+        "enqueued": [],
         "resume_kwargs": [],
         "resumable_session_ids": set(resumable_session_ids or ()),
     }
@@ -451,7 +457,8 @@ def test_capabilities() -> None:
     assert ex.supports_streaming() is True
     assert ex.supports_tool_calling() is True
     assert ex.handles_tools_internally() is True
-    assert ex.supports_live_message_queue() is False
+    # Steering rides send(mode="enqueue") — see the steering tests below.
+    assert ex.supports_live_message_queue() is True
 
 
 # ---------------------------------------------------------------------------
@@ -1817,4 +1824,56 @@ async def test_session_is_created_with_both_stall_guards(
     kwargs = state["create_kwargs"][0]
     assert kwargs["on_exit_plan_mode_request"] is not None
     assert kwargs["on_user_input_request"] is not None
+    await ex.close()
+
+
+# ---------------------------------------------------------------------------
+# Steering (live message queue)
+# ---------------------------------------------------------------------------
+
+
+def test_enqueued_content_to_text_flattens_blocks() -> None:
+    assert _enqueued_content_to_text("  hurry up  ") == "hurry up"
+    assert _enqueued_content_to_text([{"type": "input_text", "text": "also fix lint"}]) == (
+        "also fix lint"
+    )
+    assert _enqueued_content_to_text(["one", {"text": "two"}]) == "one\ntwo"
+    # Nothing sayable — an attachment-only steer has no send() equivalent.
+    assert _enqueued_content_to_text([{"type": "input_image", "image_url": "x"}]) == ""
+    assert _enqueued_content_to_text("   ") == ""
+    assert _enqueued_content_to_text(None) == ""
+
+
+def test_executor_declares_live_message_queue_support() -> None:
+    assert CopilotExecutor(github_token="gho_x").supports_live_message_queue() is True
+
+
+@pytest.mark.asyncio
+async def test_steering_message_is_enqueued_not_sent_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Enqueue lands at the agent's next boundary; immediate would race the turn."""
+    state = _install_fake_copilot(monkeypatch, [[_ev("ASSISTANT_MESSAGE", content="ok")]])
+    ex = CopilotExecutor(github_token="gho_x")
+    _ = [e async for e in ex.run_turn([_user("go")], [], "SYS")]
+    delivered = await ex.enqueue_session_message("conv1", "also update the README")
+    assert delivered is True
+    assert state["enqueued"] == [("also update the README", "enqueue")]
+    await ex.close()
+
+
+@pytest.mark.asyncio
+async def test_steering_without_a_live_session_is_declined() -> None:
+    """No session yet: the caller must fall back to the next turn, not crash."""
+    ex = CopilotExecutor(github_token="gho_x")
+    assert await ex.enqueue_session_message("conv-unknown", "hello") is False
+
+
+@pytest.mark.asyncio
+async def test_empty_steering_message_is_declined(monkeypatch: pytest.MonkeyPatch) -> None:
+    state = _install_fake_copilot(monkeypatch, [[_ev("ASSISTANT_MESSAGE", content="ok")]])
+    ex = CopilotExecutor(github_token="gho_x")
+    _ = [e async for e in ex.run_turn([_user("go")], [], "SYS")]
+    assert await ex.enqueue_session_message("conv1", "   ") is False
+    assert state["enqueued"] == []
     await ex.close()
