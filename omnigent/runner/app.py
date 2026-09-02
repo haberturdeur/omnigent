@@ -666,6 +666,41 @@ async def _evaluate_policy_via_omnigent(
 _SUBAGENT_MINT_WAIT_S: float = 30.0
 
 
+async def _apply_vendor_session_title(
+    client: httpx.AsyncClient,
+    *,
+    conversation_id: str,
+    title: str,
+) -> None:
+    """Apply a vendor-proposed session title through the seed-only rename.
+
+    Vendors that name a conversation themselves (Copilot's
+    ``SESSION_TITLE_CHANGED``) save Omnigent a synthetic background-title turn.
+    ``/auto-title`` is the right endpoint rather than a plain rename: it only
+    replaces the deterministic first-message title, so a name the user typed —
+    or an earlier automatic one that already stuck — is never clobbered.
+
+    Best-effort: a failure is logged, never raised into the turn. A title is
+    cosmetic; losing it must not fail the work that produced it.
+
+    :param client: Omnigent HTTP client for the runner subprocess.
+    :param conversation_id: The session being renamed.
+    :param title: The vendor's proposed single-line title.
+    """
+    try:
+        resp = await client.post(
+            f"/v1/sessions/{conversation_id}/auto-title",
+            json={"title": title},
+        )
+        resp.raise_for_status()
+    except Exception as exc:  # noqa: BLE001 — a title must never break the turn
+        _logger.warning(
+            "vendor session title not applied (conv=%s): %s",
+            conversation_id,
+            exc,
+        )
+
+
 async def _mint_acp_subagent_child(
     client: httpx.AsyncClient,
     *,
@@ -7574,6 +7609,25 @@ def create_runner_app(
                                             )
                                         )
                                     )
+                                    continue
+
+                                if _evt_type == "session.title_suggested":
+                                    # The vendor agent named the conversation;
+                                    # apply it via the seed-only auto-title so a
+                                    # user-chosen name survives. Swallowed —
+                                    # clients hear about the rename through the
+                                    # server's own session.title event.
+                                    _vendor_title = event.get("title", "")
+                                    if isinstance(_vendor_title, str) and _vendor_title.strip():
+                                        _dispatch_tasks.append(
+                                            _asyncio.create_task(
+                                                _apply_vendor_session_title(
+                                                    server_client,
+                                                    conversation_id=conv_id,
+                                                    title=_vendor_title,
+                                                )
+                                            )
+                                        )
                                     continue
 
                                 if _evt_type == "subagent.started":

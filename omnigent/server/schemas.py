@@ -4730,10 +4730,32 @@ class SubagentToolCallEvent(_SSEEventBase):
     arguments: str = ""
 
 
+class SessionTitleSuggestedEvent(_SSEEventBase):
+    """
+    Runner-internal marker: the vendor agent named the conversation.
+
+    Emitted by the executor adapter from an
+    :class:`~omnigent.inner.executor.SessionTitleSuggested` (e.g. Copilot's
+    ``SESSION_TITLE_CHANGED``). The runner intercepts it in ``proxy_stream`` and
+    POSTs ``/sessions/{id}/auto-title``, whose seed-only semantics replace the
+    deterministic first-message title but never a name the user chose.
+    **Never** relayed to external clients — they learn the new name from the
+    ``session.title`` event the server publishes after the rename.
+
+    :param type: Always ``"session.title_suggested"``.
+    :param title: The vendor's proposed single-line title, e.g.
+        ``"auth-refactor"``.
+    """
+
+    type: Literal["session.title_suggested"]
+    title: str
+
+
 HarnessStreamEvent = (
     ServerStreamEvent
     | InjectionConsumedEvent
     | PolicyEvaluationRequestEvent
+    | SessionTitleSuggestedEvent
     | SubagentStartedEvent
     | SubagentCompletedEvent
     | SubagentToolCallEvent

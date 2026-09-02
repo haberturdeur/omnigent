@@ -31,6 +31,7 @@ from omnigent.inner.executor import (
     ExecutorEvent,
     Message,
     ReasoningChunk,
+    SessionTitleSuggested,
     SubAgentCompleted,
     SubAgentStarted,
     SubAgentToolCall,
@@ -840,6 +841,19 @@ class ExecutorAdapter(HarnessApp):
                     compacted_messages=event.compacted_messages,
                 )
             )
+        elif isinstance(event, SessionTitleSuggested):
+            from omnigent.server.schemas import SessionTitleSuggestedEvent
+
+            # Blank titles are dropped here rather than in every executor: an
+            # empty rename would blank the session row.
+            title = event.title.strip()
+            if title:
+                ctx.emit(
+                    SessionTitleSuggestedEvent(
+                        type="session.title_suggested",
+                        title=title,
+                    )
+                )
         elif isinstance(event, SubAgentStarted):
             from omnigent.server.schemas import SubagentStartedEvent
 

@@ -319,6 +319,24 @@ class SubAgentToolCall(ExecutorEvent):
 
 
 @dataclass
+class SessionTitleSuggested(ExecutorEvent):
+    """The vendor agent named the conversation itself.
+
+    Several vendors title a session from its opening turns (Copilot's
+    ``SESSION_TITLE_CHANGED``), which is strictly better than Omnigent spending
+    a synthetic turn on :mod:`omnigent.runner.background_titles`: it costs
+    nothing extra and reflects what the agent actually did. The runner applies
+    it through the seed-only auto-title path, so a name the user chose is never
+    clobbered.
+
+    :param title: The vendor's proposed single-line title, e.g.
+        ``"auth-refactor"``. Blank titles are not emitted.
+    """
+
+    title: str
+
+
+@dataclass
 class TurnCancelled(ExecutorEvent):
     """The current assistant turn was cancelled before completion."""
 

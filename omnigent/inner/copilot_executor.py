@@ -79,6 +79,7 @@ from .executor import (
     ExecutorEvent,
     Message,
     ReasoningChunk,
+    SessionTitleSuggested,
     SubAgentCompleted,
     SubAgentStarted,
     TextChunk,
@@ -917,6 +918,11 @@ class CopilotExecutor(Executor):
                     error=error,
                     metadata={"call_id": call_id},
                 )
+            elif etype.endswith("SESSION_TITLE_CHANGED"):
+                # Copilot titles a session from its opening turns, which is both
+                # cheaper and truer than Omnigent spending a synthetic
+                # background-title turn on it.
+                yield SessionTitleSuggested(title=str(data.get("title") or ""))
             elif etype.endswith("SUBAGENT_STARTED"):
                 child_key = str(data.get("toolCallId") or "")
                 if child_key:

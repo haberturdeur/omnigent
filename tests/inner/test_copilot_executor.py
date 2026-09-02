@@ -49,6 +49,7 @@ from omnigent.inner.executor import (
     ExecutorError,
     Message,
     ReasoningChunk,
+    SessionTitleSuggested,
     SubAgentCompleted,
     SubAgentStarted,
     TextChunk,
@@ -1645,4 +1646,46 @@ async def test_subagent_event_without_a_correlation_id_is_ignored(
     ex = CopilotExecutor(github_token="gho_x")
     events = [e async for e in ex.run_turn([_user("go")], [], "SYS")]
     assert [e for e in events if isinstance(e, SubAgentStarted)] == []
+    await ex.close()
+
+
+# ---------------------------------------------------------------------------
+# Vendor-proposed session title
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_session_title_changed_becomes_a_title_suggestion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Copilot names the session itself; no synthetic title turn is needed."""
+    _install_fake_copilot(
+        monkeypatch,
+        [
+            [
+                _ev("SESSION_TITLE_CHANGED", title="auth-refactor"),
+                _ev("ASSISTANT_MESSAGE", content="done"),
+            ]
+        ],
+    )
+    ex = CopilotExecutor(github_token="gho_x")
+    events = [e async for e in ex.run_turn([_user("fix auth")], [], "SYS")]
+    titles = [e for e in events if isinstance(e, SessionTitleSuggested)]
+    assert [t.title for t in titles] == ["auth-refactor"]
+    await ex.close()
+
+
+@pytest.mark.asyncio
+async def test_blank_session_title_is_not_suggested(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty rename would blank the session row, so it never leaves here."""
+    _install_fake_copilot(
+        monkeypatch,
+        [[_ev("SESSION_TITLE_CHANGED", title="   "), _ev("ASSISTANT_MESSAGE", content="done")]],
+    )
+    ex = CopilotExecutor(github_token="gho_x")
+    events = [e async for e in ex.run_turn([_user("go")], [], "SYS")]
+    # The executor emits it verbatim; the adapter drops blanks (asserted in the
+    # adapter's own test), so nothing reaches the runner.
+    titles = [e for e in events if isinstance(e, SessionTitleSuggested)]
+    assert [t.title.strip() for t in titles] == [""]
     await ex.close()

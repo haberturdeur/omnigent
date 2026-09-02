@@ -2517,3 +2517,42 @@ def test_interrupt_slice_covers_pi_rpc_session_close_reap_budget() -> None:
         "outer slice fires first, injects CancelledError (not TimeoutError) "
         "into close(), SIGKILL fallback is skipped, Pi subprocess orphaned."
     )
+
+
+def test_translate_event_emits_session_title_suggested() -> None:
+    """A vendor-proposed title becomes the runner-internal rename event.
+
+    The runner turns this into a seed-only ``/auto-title`` POST, which is how a
+    vendor that names its own sessions (Copilot) saves Omnigent a synthetic
+    background-title turn.
+    """
+    from omnigent.inner.executor import SessionTitleSuggested
+    from omnigent.runtime.harnesses._executor_adapter import ExecutorAdapter
+    from omnigent.server.schemas import SessionTitleSuggestedEvent
+
+    adapter = ExecutorAdapter(executor_factory=lambda: _StubExecutor())
+    ctx = _RecordingTurnContext(response_id="resp_title")
+    adapter._translate_event(
+        SessionTitleSuggested(title="  auth-refactor  "),
+        ctx,  # type: ignore[arg-type]
+    )
+    assert len(ctx.emitted) == 1
+    ev = ctx.emitted[0]
+    assert isinstance(ev, SessionTitleSuggestedEvent)
+    # Surrounding whitespace is trimmed so the session row is not renamed to a
+    # padded string.
+    assert (ev.type, ev.title) == ("session.title_suggested", "auth-refactor")
+
+
+def test_translate_event_drops_a_blank_session_title() -> None:
+    """A blank rename would empty the session row, so it is never emitted."""
+    from omnigent.inner.executor import SessionTitleSuggested
+    from omnigent.runtime.harnesses._executor_adapter import ExecutorAdapter
+
+    adapter = ExecutorAdapter(executor_factory=lambda: _StubExecutor())
+    ctx = _RecordingTurnContext(response_id="resp_title_blank")
+    adapter._translate_event(
+        SessionTitleSuggested(title="   "),
+        ctx,  # type: ignore[arg-type]
+    )
+    assert ctx.emitted == []
