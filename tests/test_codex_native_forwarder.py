@@ -1635,6 +1635,60 @@ async def test_persist_codex_compaction_item_posts_event() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("window_id", [2, "window-opaque-id", "123", None])
+async def test_persist_codex_compaction_payload_validates(
+    tmp_path: Path, window_id: int | str | None
+) -> None:
+    """Native window identifiers survive server validation and serialization."""
+    import json
+
+    from omnigent.entities.conversation import parse_item_data
+
+    codex_home = tmp_path / "codex-home"
+    sessions = codex_home / "sessions"
+    sessions.mkdir(parents=True)
+    history = [{"type": "message", "role": "user", "content": []}]
+    (sessions / "rollout-thread_test.jsonl").write_text(
+        json.dumps(
+            {
+                "type": "compacted",
+                "payload": {
+                    "replacement_history": history,
+                    "window_id": window_id,
+                },
+            }
+        )
+        + "\n"
+    )
+    write_bridge_state(
+        tmp_path,
+        CodexNativeBridgeState(
+            session_id="conv_test",
+            socket_path=str(tmp_path / "app.sock"),
+            thread_id="thread_test",
+            codex_home=str(codex_home),
+        ),
+    )
+    received = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json={"data": [{"id": "item_test"}]})
+        body = json.loads(request.content)
+        parsed = parse_item_data(body["type"], body["data"])
+        received.append(json.loads(parsed.model_dump_json()))
+        return httpx.Response(202, json={"queued": True})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handle), base_url="http://server"
+    ) as client:
+        await _persist_codex_compaction_item(client, session_id="conv_test", bridge_dir=tmp_path)
+    assert len(received) == 1
+    assert received[0]["window_id"] == window_id
+    assert received[0]["compacted_messages"] == history
+
+
+@pytest.mark.asyncio
 async def test_persist_codex_compaction_item_empty_items_fallback() -> None:
     """When no items exist, last_item_id falls back to compact_boundary_ prefix."""
     empty_resp = MagicMock()

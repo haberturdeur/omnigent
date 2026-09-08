@@ -472,7 +472,7 @@ class CompactionData(BaseModel):
     model: str | None = None
     token_count: int
     compacted_messages: list[dict[str, Any]] | None = None
-    window_id: int | None = None
+    window_id: int | str | None = None
 
     @field_validator("compacted_messages")
     @classmethod
