@@ -29,6 +29,7 @@ vi.mock("@/hooks/useHosts", () => ({
   }),
 }));
 vi.mock("@/lib/profilesApi", () => ({
+  profileRoute: (id: string) => `/?profile_id=${encodeURIComponent(id)}`,
   useActiveProfile: () => ({
     profiles: profileState.profiles,
     activeProfile: profileState.activeProfile,
@@ -58,7 +59,14 @@ vi.mock("@/lib/profileUnlock", () => ({
 vi.mock("@/lib/profileNotificationActivity", () => ({
   clearProfileNotificationActivity: clearNotificationActivityMock,
 }));
-vi.mock("@/lib/routing", () => ({ useNavigate: () => vi.fn() }));
+vi.mock("@/lib/routing", () => ({
+  useNavigate: () => vi.fn(),
+  Link: ({ to, children, ...props }: React.ComponentPropsWithoutRef<"a"> & { to: string }) => (
+    <a href={to} {...props}>
+      {children}
+    </a>
+  ),
+}));
 vi.mock("@/store/chatStore", () => ({ clearAllConversationState: vi.fn() }));
 
 describe("ProfileSwitcher creation defaults", () => {
@@ -97,6 +105,30 @@ describe("ProfileSwitcher creation defaults", () => {
     expect(screen.getByText("Default host")).toBeInTheDocument();
     expect(screen.getByText("Default working directory")).toBeInTheDocument();
     expect(screen.getByRole("dialog")).toHaveClass("max-h-[calc(100dvh-2rem)]");
+  });
+
+  it("renders profile choices as links without switching this tab on modifier-click", () => {
+    const otherProfile = {
+      id: "profile-2",
+      name: "Workshop",
+      is_default: false,
+      config: {},
+      protection: {},
+      created_at: 2,
+    };
+    profileState.profiles = [profileState.activeProfile!, otherProfile];
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <ProfileSwitcher />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.pointerDown(screen.getByTestId("profile-switcher"), { button: 0 });
+    const link = screen.getByRole("menuitem", { name: "Workshop" });
+    expect(link).toHaveAttribute("href", "/?profile_id=profile-2");
+
+    fireEvent.click(link, { ctrlKey: true });
+    expect(setActiveProfileIdMock).not.toHaveBeenCalled();
   });
 
   it("stores the selected host and working directory on a public profile", async () => {

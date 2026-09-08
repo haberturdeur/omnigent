@@ -42,11 +42,12 @@ import {
   deleteProfile,
   disableProfileProtection,
   lockProfile,
+  profileRoute,
   unlockProfile,
   updateProfile,
   useActiveProfile,
 } from "@/lib/profilesApi";
-import { useNavigate } from "@/lib/routing";
+import { Link, useNavigate } from "@/lib/routing";
 import { clearAllConversationState } from "@/store/chatStore";
 
 function ProfileHostSelect({
@@ -106,21 +107,28 @@ export function ProfileSwitcher() {
     queryClient.clear();
   }, [queryClient]);
 
-  const switchProfile = useCallback(
+  const activateProfile = useCallback(
     (id: string) => {
       const target = profiles.find((profile) => profile.id === id);
       if (target?.protection.lock && !getProfileUnlockToken(id)) {
         setManuallyLockedProfileId(null);
         setUnlockProfileId(id);
-        return;
+        return false;
       }
-      if (id === activeProfile?.id) return;
+      if (id === activeProfile?.id) return true;
       if (activeProfile) clearProfileNotificationActivity(activeProfile.id);
       setActiveProfileId(id);
       purgeProfileState();
-      navigate("/");
+      return true;
     },
-    [activeProfile, navigate, profiles, purgeProfileState, setActiveProfileId],
+    [activeProfile, profiles, purgeProfileState, setActiveProfileId],
+  );
+
+  const switchProfile = useCallback(
+    (id: string) => {
+      if (activateProfile(id)) navigate(profileRoute(id));
+    },
+    [activateProfile, navigate],
   );
 
   useEffect(() => {
@@ -350,14 +358,30 @@ export function ProfileSwitcher() {
             {profiles.map((profile) => {
               const privateProfile = Boolean(profile.protection?.lock);
               return (
-                <DropdownMenuItem key={profile.id} onSelect={() => switchProfile(profile.id)}>
-                  {privateProfile ? (
-                    <LockKeyholeIcon className="size-3.5" />
-                  ) : (
-                    <UserRoundIcon className="size-3.5" />
-                  )}
-                  <span className="min-w-0 flex-1 truncate">{profile.name}</span>
-                  {profile.id === activeProfile.id && <CheckIcon className="size-3.5" />}
+                <DropdownMenuItem key={profile.id} asChild>
+                  <Link
+                    to={profileRoute(profile.id)}
+                    onClick={(event) => {
+                      if (
+                        event.button !== 0 ||
+                        event.metaKey ||
+                        event.ctrlKey ||
+                        event.shiftKey ||
+                        event.altKey
+                      ) {
+                        return;
+                      }
+                      if (!activateProfile(profile.id)) event.preventDefault();
+                    }}
+                  >
+                    {privateProfile ? (
+                      <LockKeyholeIcon className="size-3.5" />
+                    ) : (
+                      <UserRoundIcon className="size-3.5" />
+                    )}
+                    <span className="min-w-0 flex-1 truncate">{profile.name}</span>
+                    {profile.id === activeProfile.id && <CheckIcon className="size-3.5" />}
+                  </Link>
                 </DropdownMenuItem>
               );
             })}

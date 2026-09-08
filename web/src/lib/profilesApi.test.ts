@@ -1,7 +1,16 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { renderHook, waitFor } from "@testing-library/react";
+import { createElement, type ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { authenticatedFetch } from "./identity";
-import { addActiveProfileParam, createProfile, listProfiles, updateProfile } from "./profilesApi";
+import {
+  addActiveProfileParam,
+  createProfile,
+  listProfiles,
+  updateProfile,
+  useActiveProfile,
+} from "./profilesApi";
 
 vi.mock("./identity", () => ({ authenticatedFetch: vi.fn() }));
 
@@ -18,6 +27,7 @@ const profile = {
 describe("profiles API", () => {
   beforeEach(() => {
     fetchMock.mockReset();
+    window.history.replaceState({}, "", "/");
   });
 
   it("lists owner profiles", async () => {
@@ -64,5 +74,22 @@ describe("profiles API", () => {
     const params = new URLSearchParams({ archived: "false" });
     addActiveProfileParam(params);
     expect(params.toString()).toBe("archived=false");
+  });
+
+  it("selects the profile named in the page URL for a fresh tab", async () => {
+    const otherProfile = { ...profile, id: "profile-2", name: "Personal" };
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ object: "list", data: [profile, otherProfile] }), {
+        status: 200,
+      }),
+    );
+    window.history.replaceState({}, "", "/?profile_id=profile-2");
+    const client = new QueryClient();
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client }, children);
+
+    const { result } = renderHook(() => useActiveProfile(), { wrapper });
+
+    await waitFor(() => expect(result.current.activeProfile?.id).toBe("profile-2"));
   });
 });

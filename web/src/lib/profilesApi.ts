@@ -27,7 +27,21 @@ export interface Profile {
 }
 
 const ACTIVE_PROFILE_KEY = "omnigent.activeProfileId";
+const PROFILE_QUERY_PARAM = "profile_id";
 const listeners = new Set<() => void>();
+
+function readUrlProfileId(): string | null {
+  try {
+    return new URLSearchParams(globalThis.location?.search ?? "").get(PROFILE_QUERY_PARAM);
+  } catch {
+    return null;
+  }
+}
+
+export function profileRoute(id: string): string {
+  const params = new URLSearchParams({ [PROFILE_QUERY_PARAM]: id });
+  return `/?${params.toString()}`;
+}
 
 function readStoredProfileId(): string | null {
   try {
@@ -181,6 +195,7 @@ export function useProfiles() {
 
 export function useActiveProfile() {
   const profilesQuery = useProfiles();
+  const urlProfileId = readUrlProfileId();
   const [, rerender] = useState(0);
   useEffect(() => {
     const listener = () => rerender((value) => value + 1);
@@ -189,13 +204,15 @@ export function useActiveProfile() {
 
   const activeProfile = useMemo(() => {
     const profiles = profilesQuery.data ?? [];
-    const selected = profiles.find((profile) => profile.id === resolvedActiveProfileId);
+    const selected = profiles.find(
+      (profile) => profile.id === (urlProfileId ?? resolvedActiveProfileId),
+    );
     const fallback = selected ?? profiles.find((profile) => profile.is_default) ?? profiles[0];
     if (fallback && fallback.id !== resolvedActiveProfileId) {
       resolvedActiveProfileId = fallback.id;
     }
     return fallback ?? null;
-  }, [profilesQuery.data]);
+  }, [profilesQuery.data, urlProfileId]);
 
   useEffect(() => {
     if (activeProfile) {
