@@ -470,6 +470,13 @@ class SessionResourceRegistry:
         with self._lock:
             self._last_session_status[session_id] = status
 
+    def has_active_turns(self) -> bool:
+        """Report native turns still running or waiting for input."""
+        with self._lock:
+            return any(
+                status in {"running", "waiting"} for status in self._last_session_status.values()
+            )
+
     def _take_session_status_memo(self, session_id: str) -> str | None:
         """Pop and return the session's recorded PTY status (or ``None``)."""
         with self._lock:
@@ -567,8 +574,8 @@ class SessionResourceRegistry:
         :param session_id: Session/conversation identifier, e.g. ``"conv_abc"``.
         :param status: External native status, e.g. ``"running"`` or ``"idle"``.
         """
-        if status == "idle":
-            self._set_session_status_memo(session_id, "idle")
+        if status in {"idle", "failed"}:
+            self._set_session_status_memo(session_id, status)
         elif status in {"running", "waiting"}:
             self._set_session_status_memo(session_id, "running")
         self._sync_status_edge(session_id, status)

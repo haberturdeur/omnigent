@@ -2539,6 +2539,8 @@ def create_runner_app(
     def _has_active_work() -> bool:
         if _active_turns:
             return True
+        if resource_registry is not None and resource_registry.has_active_turns():
+            return True
         if _has_live_async_tasks(_session_async_tasks):
             return True
         for timers in _session_timers.values():

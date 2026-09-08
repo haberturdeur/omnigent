@@ -22,7 +22,50 @@ from omnigent.runner.app import (
     register_timer,
     unregister_timer,
 )
+from tests.runner.conftest import _FakeProcessManager, _runner_client, _ScriptedHarnessClient
 from tests.runner.helpers import NullServerClient
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("active_status", ["running", "waiting"])
+@pytest.mark.parametrize("terminal_status", ["idle", "failed"])
+async def test_native_turn_blocks_idle_shutdown_until_terminal_status(
+    active_status: str, terminal_status: str
+) -> None:
+    """Native status edges keep the watchdog alive until completion or failure."""
+    app = create_runner_app(
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+        process_manager=_FakeProcessManager(_ScriptedHarnessClient([])),  # type: ignore[arg-type]
+    )
+    async with _runner_client(app) as client:
+
+        async def post_status(status: str) -> None:
+            response = await client.post(
+                "/v1/sessions/native_idle_test/events",
+                json={"type": "external_session_status", "data": {"status": status}},
+            )
+            assert response.status_code == 204
+
+        await post_status(active_status)
+        assert app.state.has_active_work() is True
+        await _assert_monitor_blocked_then_shuts_down(
+            has_active_work=app.state.has_active_work,
+            release=lambda: post_status(terminal_status),
+        )
+        assert app.state.has_active_work() is False
+
+
+@pytest.mark.asyncio
+async def test_native_turn_start_and_cleanup_update_idle_accounting() -> None:
+    """The startup gap is protected, and session cleanup releases the pin."""
+    app = _scaffold_app()
+    registry = app.state.session_resource_registry
+    registry.note_session_turn_started("native_start")
+    assert app.state.has_active_work() is True
+    registry.resync_session_statuses()
+    assert app.state.has_active_work() is True
+    await registry.cleanup_session("native_start")
+    assert app.state.has_active_work() is False
 
 
 @pytest.fixture(autouse=True)
