@@ -87,6 +87,7 @@ from omnigent.server.routes._sessions.common import (
     _EXTERNAL_COMPACTION_STATUS_TYPE,
     _EXTERNAL_COMPACTION_STATUS_VALUES,
     _EXTERNAL_CONVERSATION_ITEM_TYPE,
+    _EXTERNAL_CURSOR_SUBAGENT_START_TYPE,
     _EXTERNAL_ELICITATION_RESOLVED_TYPE,
     _EXTERNAL_MCP_STARTUP_STATUS_VALUES,
     _EXTERNAL_MCP_STARTUP_TYPE,
@@ -550,6 +551,7 @@ def register_events_routes(
             _EXTERNAL_SESSION_TODOS_TYPE,
             _EXTERNAL_SUBAGENT_START_TYPE,
             _EXTERNAL_ACP_SUBAGENT_START_TYPE,
+            _EXTERNAL_CURSOR_SUBAGENT_START_TYPE,
             _EXTERNAL_CODEX_SUBAGENT_START_TYPE,
             _EXTERNAL_ANTIGRAVITY_SUBAGENT_START_TYPE,
             _EXTERNAL_CODEX_COLLABORATION_MODE_CHANGE_TYPE,
@@ -1453,12 +1455,13 @@ def register_events_routes(
                 conversation_store,
             )
             return {"queued": False, "child_session_id": child_id}
-        if body.type == _EXTERNAL_ACP_SUBAGENT_START_TYPE:
+        if body.type in (_EXTERNAL_ACP_SUBAGENT_START_TYPE, _EXTERNAL_CURSOR_SUBAGENT_START_TYPE):
             child_id = await _persist_external_acp_subagent_start(
                 session_id,
                 conv,
                 body,
                 conversation_store,
+                namespace="cursor" if body.type == _EXTERNAL_CURSOR_SUBAGENT_START_TYPE else "acp",
             )
             # Returned to the runner so it can address the sub-agent's transcript
             # items and its completion status to the child id.

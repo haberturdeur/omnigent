@@ -2483,6 +2483,9 @@ async def _auto_create_cursor_terminal(
     write_hooks_config(Path(workspace), bridge_dir)
     cursor_command = resolve_cursor_executable()
     cursor_args = list(launch_config.terminal_launch_args or [])
+    from omnigent.inner.cursor_protocol.transport import LAUNCH_FLAG, prepare_launch
+
+    cursor_args = [arg for arg in cursor_args if arg != LAUNCH_FLAG]
     if "--approve-mcps" not in cursor_args:
         cursor_args.append("--approve-mcps")
     # On cold resume, pass ``--resume <chatId>`` to cursor-agent so the TUI
@@ -2500,6 +2503,7 @@ async def _auto_create_cursor_terminal(
         model = launch_config.model_override or _cursor_native_model_from_spec(agent_spec)
         if model is not None:
             cursor_args.extend(["--model", model])
+    cursor_command, cursor_args = prepare_launch(cursor_command, cursor_args, bridge_dir)
     terminal_view = await resource_registry.launch_required_terminal(
         session_id=session_id,
         terminal_name="cursor",
@@ -2554,10 +2558,6 @@ async def _auto_create_cursor_terminal(
     _runner_auth = _RunnerDatabricksAuth(_make_auth_token_factory())
 
     from omnigent.cursor_native_forwarder import supervise_cursor_forwarder
-    from omnigent.cursor_native_permissions import (
-        cursor_launch_args_enable_yolo,
-        supervise_cursor_transcript_elicitations,
-    )
     from omnigent.cursor_native_usage import supervise_cursor_usage_forwarder
 
     if server_client is not None and ensure_comment_relay is not None:
@@ -2583,7 +2583,15 @@ async def _auto_create_cursor_terminal(
         usage log and posts cumulative token usage / cost (see
         :mod:`omnigent.cursor_native_usage`).
         """
+        from omnigent.inner.cursor_protocol.forwarder import forward_protocol_events
+
         await asyncio.gather(
+            forward_protocol_events(
+                base_url=server_url,
+                session_id=session_id,
+                bridge_dir=bridge_dir,
+                auth=_runner_auth,
+            ),
             supervise_cursor_forwarder(
                 base_url=server_url,
                 headers={},
@@ -2593,21 +2601,6 @@ async def _auto_create_cursor_terminal(
                 workspace=workspace,
                 launch_epoch_ms=launch_epoch_ms,
                 auth=_runner_auth,
-            ),
-            supervise_cursor_transcript_elicitations(
-                base_url=server_url,
-                headers={},
-                session_id=session_id,
-                bridge_dir=bridge_dir,
-                workspace=workspace,
-                launch_epoch_ms=launch_epoch_ms,
-                auth=_runner_auth,
-                # Yolo / force sessions still sometimes leave pending markers;
-                # answer those in-pane instead of mirroring a card to a parent
-                # that cannot click it.
-                auto_accept_approvals=cursor_launch_args_enable_yolo(
-                    launch_config.terminal_launch_args
-                ),
             ),
             supervise_cursor_usage_forwarder(
                 base_url=server_url,

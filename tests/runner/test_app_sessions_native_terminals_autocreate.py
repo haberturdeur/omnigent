@@ -1255,6 +1255,7 @@ async def _run_auto_create_cursor_terminal(
     monkeypatch: pytest.MonkeyPatch,
     agent_spec: AgentSpec | None,
     terminal_launch_args: list[str] | None,
+    executable: str | None = None,
 ) -> dict[str, Any]:
     """Drive ``_auto_create_cursor_terminal`` and return what it wired up.
 
@@ -1271,11 +1272,20 @@ async def _run_auto_create_cursor_terminal(
     """
     from omnigent.runner import _entry as _runner_entry
 
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    if executable is None:
+        from omnigent.inner.cursor_protocol.transport import SUPPORTED_VERSION
+
+        install = tmp_path / SUPPORTED_VERSION
+        install.mkdir()
+        for name in ("cursor-agent", "node", "index.js"):
+            (install / name).touch()
+        executable = str(install / "cursor-agent")
     workspace = tmp_path / "ws"
     workspace.mkdir()
     monkeypatch.setattr(cursor_native_bridge, "_BRIDGE_ROOT", tmp_path / "cursor-bridge")
     monkeypatch.setenv("RUNNER_SERVER_URL", "http://127.0.0.1:8000")
-    monkeypatch.setattr("omnigent.cursor_native.resolve_cursor_executable", lambda: "cursor-agent")
+    monkeypatch.setattr("omnigent.cursor_native.resolve_cursor_executable", lambda: executable)
 
     async def _no_op_forwarder(**kwargs: Any) -> None:
         del kwargs
@@ -1294,6 +1304,14 @@ async def _run_auto_create_cursor_terminal(
 
     captured: dict[str, Any] = {"elicitation_kwargs": {}}
     started = asyncio.Event()
+
+    async def _capture_protocol(**kwargs: Any) -> None:
+        captured["protocol_kwargs"] = kwargs
+        started.set()
+
+    monkeypatch.setattr(
+        "omnigent.inner.cursor_protocol.forwarder.forward_protocol_events", _capture_protocol
+    )
 
     async def _capture_elicitation_supervisor(**kwargs: Any) -> None:
         captured["elicitation_kwargs"] = kwargs
@@ -1373,7 +1391,7 @@ async def test_auto_create_cursor_terminal_injects_spec_model(
         terminal_launch_args=None,
     )
     spec = captured["spec"]
-    assert spec.command == "cursor-agent"
+    assert Path(spec.command).name == "node"
     assert "--model" in spec.args
     assert spec.args[spec.args.index("--model") + 1] == "sonnet-4-thinking"
 
@@ -1439,38 +1457,35 @@ async def test_auto_create_cursor_terminal_omits_model_when_unusable(
 
 
 @pytest.mark.parametrize(
-    ("terminal_launch_args", "expected"),
+    "terminal_launch_args",
     [
-        (None, False),
-        (["--auto-review"], False),
-        (["--yolo=false"], False),
-        (["--yolo"], True),
-        (["--force"], True),
-        (["-f"], True),
+        None,
+        ["--auto-review"],
+        ["--yolo=false"],
+        ["--yolo"],
+        ["--force"],
+        ["-f"],
     ],
     ids=["none", "auto-review", "yolo-off", "yolo", "force", "short-force"],
 )
 @pytest.mark.asyncio
-async def test_auto_create_cursor_terminal_wires_yolo_auto_accept(
+async def test_auto_create_cursor_terminal_uses_native_approvals_for_all_modes(
     terminal_launch_args: list[str] | None,
-    expected: bool,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The elicitation supervisor's yolo stance is derived from the launch args.
-
-    This wiring is the only thing that turns the in-pane auto-accept on. It is
-    a single kwarg in a large auto-create function, so without this assertion a
-    rebase can drop it and leave the feature inert with the rest of the suite
-    green.
-    """
+    """All approval modes use the live native bridge, including unrestricted mode."""
     captured = await _run_auto_create_cursor_terminal(
         tmp_path=tmp_path,
         monkeypatch=monkeypatch,
         agent_spec=None,
         terminal_launch_args=terminal_launch_args,
     )
-    assert captured["elicitation_kwargs"]["auto_accept_approvals"] is expected
+    assert not captured["elicitation_kwargs"]
+    assert captured["protocol_kwargs"]
+    assert (terminal_launch_args or []) == [
+        arg for arg in captured["spec"].args if arg in (terminal_launch_args or [])
+    ]
 
 
 @pytest.mark.parametrize(
@@ -3605,3 +3620,36 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
         assert model_catalog_store.read_catalog("claude-native", fingerprint) == refreshed
 
     await fake_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_auto_create_cursor_enables_native_protocol_without_flags(tmp_path, monkeypatch):
+    from omnigent.inner.cursor_protocol.transport import SUPPORTED_VERSION
+
+    install = tmp_path / SUPPORTED_VERSION
+    install.mkdir()
+    for name in ("cursor-agent", "node", "index.js"):
+        (install / name).touch()
+    captured = await _run_auto_create_cursor_terminal(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        agent_spec=None,
+        terminal_launch_args=None,
+        executable=str(install / "cursor-agent"),
+    )
+    assert captured["spec"].command == str(install / "node")
+    assert any(arg.endswith("bridge.cjs") for arg in captured["spec"].args)
+    assert captured["protocol_kwargs"]["session_id"] == "c42dbcb16fd3a87ee8f5d1fe4cabfdf8"
+    assert not captured["elicitation_kwargs"]
+
+
+@pytest.mark.asyncio
+async def test_auto_create_cursor_rejects_unsupported_build_without_flags(tmp_path, monkeypatch):
+    with pytest.raises(RuntimeError, match="requires CLI"):
+        await _run_auto_create_cursor_terminal(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            agent_spec=None,
+            terminal_launch_args=None,
+            executable="/unsupported/cursor-agent",
+        )

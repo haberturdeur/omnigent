@@ -10,6 +10,7 @@ interface TodoItem {
 
 interface TodoPanelProps {
   frameless?: boolean;
+  emptyMessage?: string;
 }
 
 function TodoIcon({ status }: { status: TodoItem["status"] }) {
@@ -28,15 +29,19 @@ function TodoIcon({ status }: { status: TodoItem["status"] }) {
  * Reads from `useChatStore.todos`, populated by the session snapshot and
  * `session.todos` SSE updates. Renders nothing while the list is empty.
  */
-export function TodoPanel({ frameless = false }: TodoPanelProps) {
+export function TodoPanel({ frameless = false, emptyMessage }: TodoPanelProps) {
   const todos = useChatStore((s) => s.todos);
 
-  if (todos.length === 0) return null;
+  if (todos.length === 0) {
+    return emptyMessage ? (
+      <p className="p-4 text-sm text-muted-foreground">{emptyMessage}</p>
+    ) : null;
+  }
 
   return (
     <div
       className={cn(
-        "flex flex-1 flex-col bg-card",
+        "flex min-h-0 flex-1 flex-col bg-card",
         !frameless && "border-t border-b border-border",
       )}
     >

@@ -6,6 +6,7 @@ import {
   FileDiffIcon,
   GlobeIcon,
   Loader2Icon,
+  ListTodoIcon,
   MaximizeIcon,
   MinimizeIcon,
   PlusIcon,
@@ -44,6 +45,7 @@ import { FilesPanel } from "./FilesPanel";
 import { FileViewer } from "./FileViewer";
 import type { ChangedSort } from "./FlatFileList";
 import { SubagentsPanel } from "./SubagentsPanel";
+import { TodoPanel } from "./TodoPanel";
 import { useTerminalStatuses } from "./useTerminalStatuses";
 import { type RightRailTab, TAB_BADGE_BASE } from "./railTabs";
 import { Button } from "../components/ui/button";
@@ -841,6 +843,16 @@ export function WorkspacePanel({
                 </span>
               </TabsTrigger>
             </WorkspaceTabTooltip>
+            <WorkspaceTabTooltip label="Todos">
+              <TabsTrigger
+                value="todos"
+                aria-label="Todos"
+                className="size-6 shrink-0 p-0 hover:border-1 hover:border-muted rounded-md!"
+              >
+                <ListTodoIcon />
+                <span className="sr-only">Todos</span>
+              </TabsTrigger>
+            </WorkspaceTabTooltip>
             {showBrowserTab && (
               <WorkspaceTabTooltip label="Browser">
                 <TabsTrigger
@@ -965,6 +977,8 @@ export function WorkspacePanel({
           // Embedded browser (Electron only) — BrowserPane self-gates and
           // measures this rail slot to position the native view over it.
           <BrowserPane conversationId={conversationId} className="min-h-0 flex-1" />
+        ) : rightRailTab === "todos" ? (
+          <TodoPanel frameless emptyMessage="No todos yet for this session." />
         ) : rightRailTab === "subagents" && rootSessionId ? (
           <SubagentsPanel conversationId={conversationId} rootSessionId={rootSessionId} />
         ) : (

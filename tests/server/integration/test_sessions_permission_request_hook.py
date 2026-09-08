@@ -399,6 +399,41 @@ async def test_cursor_permission_request_hook_stamps_ask_user_question_extra(
     assert resp.status_code == 200, resp.text
 
 
+@pytest.mark.parametrize("native_control", [False, True])
+async def test_cursor_native_reply_owns_rejection_without_interrupt_race(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    native_control: bool,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from omnigent.server.routes.sessions import routes_hooks
+
+    forward = AsyncMock()
+    monkeypatch.setattr(routes_hooks, "_forward_session_change_to_runner", forward)
+    agent = await create_test_agent(client, "test-cursor-native-decline")
+    session_id = await _create_session(client, agent["id"])
+    elicitation_id = f"elicit_cursor_{session_id}_native"
+    drain = asyncio.create_task(_drain_until_elicitation(session_id))
+    await asyncio.sleep(0.05)
+    hook = asyncio.create_task(
+        client.post(
+            f"/v1/sessions/{session_id}/hooks/cursor-permission-request",
+            json={
+                "elicitation_id": elicitation_id,
+                "native_control": native_control,
+                "operation_type": "tool",
+                "message": "Allow this operation?",
+            },
+        )
+    )
+    await drain
+    await _post_approval(client, session_id, elicitation_id, "decline")
+    response = await hook
+    assert response.json()["action"] == "decline"
+    assert forward.await_count == (0 if native_control else 1)
+
+
 async def test_top_level_elicitations_route_is_not_mounted(
     app: FastAPI,
     client: httpx.AsyncClient,

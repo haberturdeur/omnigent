@@ -9,6 +9,16 @@ import type { ChangedSort } from "./FlatFileList";
 import type { RightRailTab } from "./railTabs";
 import { WorkspacePanel } from "./WorkspacePanel";
 
+const todoState = vi.hoisted(() => ({
+  todos: [] as { content: string; status: "pending"; activeForm: string }[],
+}));
+vi.mock("@/store/chatStore", () => ({
+  useChatStore: (selector: (state: typeof todoState) => unknown) => selector(todoState),
+}));
+afterEach(() => {
+  todoState.todos = [];
+});
+
 // The rail's content children are exercised by their own suites; stub them so
 // these tests focus on WorkspacePanel's own logic (the open-file/shell tab
 // strips and the content branch that swaps FileViewer ↔ FilesPanel ↔ shell).
@@ -139,6 +149,25 @@ function renderWorkspace(
 }
 
 describe("WorkspacePanel surface presentation", () => {
+  it("offers a Todos tab and routes its selection", () => {
+    const { onRightRailTabChange } = renderWorkspace();
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "Todos" }), { button: 0, ctrlKey: false });
+    expect(onRightRailTabChange).toHaveBeenCalledWith("todos");
+  });
+
+  it("shows the active session's todos in the right pane", () => {
+    todoState.todos = [
+      { content: "Verify Cursor", status: "pending", activeForm: "Verify Cursor" },
+    ];
+    renderWorkspace({ rightRailTab: "todos" });
+    expect(screen.getByText("Verify Cursor")).toBeInTheDocument();
+    expect(screen.queryByTestId("files-panel-stub")).not.toBeInTheDocument();
+  });
+
+  it("keeps the Todos tab usable before any tasks arrive", () => {
+    renderWorkspace({ rightRailTab: "todos" });
+    expect(screen.getByText("No todos yet for this session.")).toBeInTheDocument();
+  });
   it("sits flush to the window edge with a left divider, no floating card frame", () => {
     renderWorkspace();
 

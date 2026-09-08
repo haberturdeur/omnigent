@@ -713,6 +713,16 @@ def inject_user_message(
     """
     if not content:
         raise RuntimeError("cursor-native injection requires non-empty content")
+    from omnigent.inner.cursor_protocol.transport import enabled, send_control
+
+    if enabled(bridge_dir):
+        action = (
+            {"action": "compact"}
+            if content.strip() == "/summarize"
+            else {"action": "prompt", "content": content}
+        )
+        send_control(bridge_dir, action, timeout=timeout_s)
+        return
     info = _wait_for_tmux_info(bridge_dir, timeout_s=timeout_s)
     socket_path = info["socket_path"]
     tmux_target = info["tmux_target"]
@@ -794,6 +804,11 @@ def inject_model_command(
     model = model.strip()
     if not model:
         raise RuntimeError("cursor-native model switch requires a non-empty model id")
+    from omnigent.inner.cursor_protocol.transport import enabled, send_control
+
+    if enabled(bridge_dir):
+        send_control(bridge_dir, {"action": "model", "model": model}, timeout=timeout_s)
+        return
     if expected_display_name is None:
         try:
             expected_display_name = next(
@@ -919,6 +934,10 @@ def inject_interrupt(bridge_dir: Path, *, timeout_s: float = _TMUX_READY_TIMEOUT
 
     :raises RuntimeError: If the tmux target is not advertised or send-keys fails.
     """
+    from omnigent.inner.cursor_protocol.transport import cancel_active_run
+
+    if cancel_active_run(bridge_dir):
+        return
     info = _wait_for_tmux_info(bridge_dir, timeout_s=timeout_s)
     socket_path = info["socket_path"]
     tmux_target = info["tmux_target"]

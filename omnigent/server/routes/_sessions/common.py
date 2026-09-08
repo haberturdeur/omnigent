@@ -146,6 +146,7 @@ _EXTERNAL_SUBAGENT_START_TYPE: str = "external_subagent_start"
 
 
 _EXTERNAL_ACP_SUBAGENT_START_TYPE: str = "external_acp_subagent_start"
+_EXTERNAL_CURSOR_SUBAGENT_START_TYPE: str = "external_cursor_subagent_start"
 
 
 # Stable id an ACP agent gave the sub-agent it spawned (Devin's ``agentId``);
@@ -459,6 +460,7 @@ _ALLOWED_EVENT_TYPES: frozenset[str] = frozenset(ITEM_TYPE_TO_DATA_CLS.keys()) |
     _EXTERNAL_SESSION_TODOS_TYPE,
     _EXTERNAL_SUBAGENT_START_TYPE,
     _EXTERNAL_ACP_SUBAGENT_START_TYPE,
+    _EXTERNAL_CURSOR_SUBAGENT_START_TYPE,
     _EXTERNAL_CODEX_SUBAGENT_START_TYPE,
     _EXTERNAL_ANTIGRAVITY_SUBAGENT_START_TYPE,
     _EXTERNAL_CODEX_COLLABORATION_MODE_CHANGE_TYPE,

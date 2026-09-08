@@ -3105,6 +3105,7 @@ def _find_acp_subagent_child(
     conversation_store: ConversationStore,
     parent_id: str,
     subagent_id: str,
+    label_key: str = _ACP_SUBAGENT_ID_LABEL_KEY,
 ) -> Conversation | None:
     """
     Look up an existing ACP sub-agent child by its harness-side id.
@@ -3127,7 +3128,7 @@ def _find_acp_subagent_child(
             after=after,
         )
         for child in page.data:
-            if child.labels.get(_ACP_SUBAGENT_ID_LABEL_KEY) == subagent_id:
+            if child.labels.get(label_key) == subagent_id:
                 return child
         if not page.has_more or page.last_id is None:
             return None
@@ -3139,9 +3140,11 @@ async def _persist_external_acp_subagent_start(
     parent_conv: Conversation,
     body: SessionEventInput,
     conversation_store: ConversationStore,
+    *,
+    namespace: str = "acp",
 ) -> str:
     """
-    Mint a child :class:`Conversation` for an ACP agent's sub-agent.
+    Mint a display child for an ACP or native Cursor sub-agent.
 
     The ACP counterpart of :func:`_persist_external_subagent_start`. An ACP
     agent (e.g. Devin) runs its sub-agents inside its own single session, so the
@@ -3168,39 +3171,46 @@ async def _persist_external_acp_subagent_start(
     :raises OmnigentError: 400 when a required key is missing or the parent has
         no ``agent_id``.
     """
+    id_label = _ACP_SUBAGENT_ID_LABEL_KEY if namespace == "acp" else "omnigent.cursor.subagent_id"
+    description_label = (
+        _ACP_SUBAGENT_DESCRIPTION_LABEL_KEY
+        if namespace == "acp"
+        else "omnigent.cursor.subagent_description"
+    )
     subagent_id = body.data.get("subagent_id")
     title_raw = body.data.get("title")
     description = body.data.get("description") or ""
     if not isinstance(subagent_id, str) or not subagent_id:
         raise OmnigentError(
-            "external_acp_subagent_start requires non-empty data.subagent_id",
+            f"external_{namespace}_subagent_start requires non-empty data.subagent_id",
             code=ErrorCode.INVALID_INPUT,
         )
     if not isinstance(title_raw, str) or not title_raw:
         raise OmnigentError(
-            "external_acp_subagent_start requires non-empty data.title",
+            f"external_{namespace}_subagent_start requires non-empty data.title",
             code=ErrorCode.INVALID_INPUT,
         )
     if not isinstance(description, str):
         raise OmnigentError(
-            "external_acp_subagent_start data.description must be a string",
+            f"external_{namespace}_subagent_start data.description must be a string",
             code=ErrorCode.INVALID_INPUT,
         )
     if parent_conv.agent_id is None:
         raise OmnigentError(
-            f"parent session {parent_id!r} has no agent_id; cannot create an ACP sub-agent child",
+            f"parent session {parent_id!r} has no agent_id; "
+            f"cannot create a {namespace} sub-agent child",
             code=ErrorCode.INVALID_INPUT,
         )
 
     existing = await asyncio.to_thread(
-        _find_acp_subagent_child, conversation_store, parent_id, subagent_id
+        _find_acp_subagent_child, conversation_store, parent_id, subagent_id, id_label
     )
     if existing is not None:
         return existing.id
 
     labels = {
-        _ACP_SUBAGENT_ID_LABEL_KEY: subagent_id,
-        _ACP_SUBAGENT_DESCRIPTION_LABEL_KEY: description,
+        id_label: subagent_id,
+        description_label: description,
     }
     # ``(parent_conversation_id, title)`` is unique, and an agent can give two
     # parallel sub-agents the same label, so the stable id disambiguates. The

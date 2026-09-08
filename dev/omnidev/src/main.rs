@@ -196,7 +196,7 @@ fn run_omnigent(args: RunArgs, passthrough: Vec<String>) -> Result<()> {
     // Read persisted ports so OMNIGENT_URL points at a running supervisor's
     // server (if any). Supervisor-only flags don't apply to the passthrough, so
     // never override — the pod stays in sync with whatever the supervisor set.
-    let ports = Ports::resolve(&pod_dir, None, None)?;
+    let ports = Ports::for_client(&pod_dir)?;
     let pod = Pod::create(
         repo_root,
         pod_dir,

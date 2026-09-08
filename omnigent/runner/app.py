@@ -9743,6 +9743,21 @@ def create_runner_app(
             )
         return JSONResponse(status_code=200, content={"models": models})
 
+    @app.get("/v1/sessions/{session_id}/cursor-approval-config")
+    async def get_session_cursor_approval_config(session_id: str) -> JSONResponse:
+        if _session_harness_name(session_id) != "cursor-native":
+            return JSONResponse(status_code=404, content={"error": "not_cursor_native"})
+        from omnigent.cursor_native_bridge import bridge_dir_for_session_id
+        from omnigent.inner.cursor_protocol.transport import read_approval_config
+
+        try:
+            config = await asyncio.to_thread(
+                read_approval_config, bridge_dir_for_session_id(session_id)
+            )
+        except RuntimeError as exc:
+            return JSONResponse(status_code=503, content={"error": str(exc)})
+        return JSONResponse(content=config, headers={"Cache-Control": "no-store"})
+
     @app.get("/v1/sessions/{session_id}/cursor-model-options")
     async def get_session_cursor_model_options(session_id: str) -> JSONResponse:
         if _session_harness_name(session_id) != "cursor-native":

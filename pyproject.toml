@@ -438,6 +438,7 @@ where = ["."]
 include = ["omnigent*"]
 
 [tool.setuptools.package-data]
+"omnigent.inner.cursor_protocol" = ["*.cjs"]
 "omnigent.db" = ["alembic.ini"]
 "omnigent.db.migrations" = ["script.py.mako"]
 "omnigent.resources.examples" = ["*.yaml", "*.sh", "debby/**/*", "polly/**/*"]

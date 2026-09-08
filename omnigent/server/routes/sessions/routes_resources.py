@@ -23,7 +23,7 @@ from fastapi import (
     Request,
     UploadFile,
 )
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 
 from omnigent.entities import (
     Conversation,
@@ -112,6 +112,14 @@ def register_resources_routes(
     host_registry: HostRegistry | None = None,
 ) -> None:
     """Register the resources routes on router."""
+
+    @router.get("/sessions/{session_id}/cursor-approval-config", response_model=None)
+    async def get_cursor_approval_config(request: Request, session_id: str) -> JSONResponse:
+        conversation = await _validate_session(session_id, request, LEVEL_READ)
+        config = await _proxy_get_to_runner(
+            session_id, f"/v1/sessions/{session_id}/cursor-approval-config", conversation
+        )
+        return JSONResponse(content=config, headers={"Cache-Control": "no-store"})
 
     @router.get(
         "/sessions/{session_id}/resources",

@@ -647,6 +647,7 @@ def register_native_commands(cli: click.Group) -> None:
     @click.option(
         "--server",
         default=None,
+        envvar="OMNIGENT_URL",
         help=(
             "Remote omnigent URL. Ensures the host daemon, asks the "
             "daemon-spawned runner to launch the Cursor TUI, and attaches this TTY. "

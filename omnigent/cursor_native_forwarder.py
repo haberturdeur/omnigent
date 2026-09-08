@@ -42,6 +42,7 @@ import os
 import re
 import sqlite3
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -275,6 +276,8 @@ def _chat_claimed_by_other(bridge_dir: Path, store_path: Path, my_launch_ms: int
     for sibling in root.iterdir():
         if sibling.name == me or not sibling.is_dir():
             continue
+        if _native_chat_owner(sibling) == store_path.parent.name:
+            return True
         other = _read_state(sibling)
         if other.store_path != target:
             continue
@@ -285,6 +288,33 @@ def _chat_claimed_by_other(bridge_dir: Path, store_path: Path, my_launch_ms: int
         if other.launch_epoch_ms == my_launch_ms and sibling.name < me:
             return True
     return False
+
+
+def _native_chat_owner(bridge_dir: Path) -> str | None:
+    """Identify a live native terminal without relying on transcript discovery."""
+    try:
+        state = json.loads((bridge_dir / "protocol" / "active.json").read_text())
+        if not state.get("controlsReady"):
+            return None
+        pid = state.get("pid")
+        if not isinstance(pid, int) or pid <= 0:
+            return None
+        os.kill(pid, 0)
+        return str(uuid.UUID(state["conversationId"]))
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _native_store_path(bridge_dir: Path, workspace: str) -> Path | None:
+    chat_id = _native_chat_owner(bridge_dir)
+    if chat_id is None:
+        return None
+    root = _cursor_chats_root()
+    exact = root / _workspace_hash(workspace) / chat_id / "store.db"
+    if exact.exists():
+        return exact
+    matches = list(root.glob(f"*/{chat_id}/store.db"))
+    return matches[0] if len(matches) == 1 else None
 
 
 def _get_current_rowid(store_path: Path) -> int:
@@ -881,6 +911,7 @@ async def forward_cursor_store_to_session(
     launch_epoch_ms: int,
     poll_interval_s: float = _DEFAULT_POLL_INTERVAL_S,
     auth: httpx.Auth | None = None,
+    fixed_store_path: Path | None = None,
 ) -> None:
     """Tail the cursor chat store and mirror new messages into the AP session.
 
@@ -909,9 +940,12 @@ async def forward_cursor_store_to_session(
     :param launch_epoch_ms: Wall-clock ms when this terminal launched.
     :param poll_interval_s: Seconds between store polls.
     :param auth: Optional refresh-capable httpx Auth for remote deployments.
+    :param fixed_store_path: Exact native child store; disables workspace discovery.
     :returns: Never normally returns; cancel the task to stop it.
     """
     persisted = _read_state(bridge_dir)
+    if fixed_store_path is not None and persisted.store_path != str(fixed_store_path):
+        persisted = _ForwardState(store_path=str(fixed_store_path))
     store_path: Path | None = None
     last_rowid = 0
     # Bounded-retry-then-skip guard (see the post loop below): the rowid whose
@@ -923,12 +957,31 @@ async def forward_cursor_store_to_session(
     # so the cold-resume path can pass ``--resume <chatId>`` to cursor-agent.
     chat_id_patched = False
     model_state = _ModelMirrorState()
+    protocol_enabled = (bridge_dir / "protocol" / "enabled").exists()
     timeout = httpx.Timeout(_POST_TIMEOUT_S)
     async with httpx.AsyncClient(
         base_url=base_url, headers=headers, auth=auth, timeout=timeout
     ) as client:
         while True:
             try:
+                if protocol_enabled and fixed_store_path is None:
+                    native_store = _native_store_path(bridge_dir, workspace)
+                    if native_store is None:
+                        await asyncio.sleep(poll_interval_s)
+                        continue
+                    if native_store != store_path:
+                        persisted = _ForwardState(
+                            store_path=str(native_store),
+                            last_rowid=persisted.last_rowid
+                            if persisted.store_path == str(native_store)
+                            else 0,
+                        )
+                        store_path = None
+                        chat_id_patched = False
+                        model_state = _ModelMirrorState()
+                if fixed_store_path is not None and not fixed_store_path.exists():
+                    await asyncio.sleep(poll_interval_s)
+                    continue
                 if store_path is None or not store_path.exists():
                     # On cold resume the runner pre-seeds the bridge state with
                     # the known store path (see ``preseed_resume_state``), so we
@@ -990,13 +1043,14 @@ async def forward_cursor_store_to_session(
                                 )
                                 chat_id_patched = True
                 if store_path is not None and store_path.exists():
-                    # cursor keeps ONE chat per working dir, so two cursor-native
-                    # sessions launched in the same cwd discover the same store.
-                    # Yield to an earlier-launched live session rather than mirror
-                    # the same chat into a second conversation (the duplicate-
-                    # session bug); the released store is re-evaluated next poll.
-                    if await asyncio.to_thread(
-                        _chat_claimed_by_other, bridge_dir, store_path, launch_epoch_ms
+                    # Workspace discovery can select another terminal's chat.
+                    # Yield to its native owner or an earlier live mirror.
+                    if (
+                        not protocol_enabled
+                        and fixed_store_path is None
+                        and await asyncio.to_thread(
+                            _chat_claimed_by_other, bridge_dir, store_path, launch_epoch_ms
+                        )
                     ):
                         _logger.warning(
                             "cursor chat %s already mirrored by another session; "
@@ -1215,6 +1269,7 @@ async def supervise_cursor_forwarder(
     launch_epoch_ms: int,
     poll_interval_s: float = _DEFAULT_POLL_INTERVAL_S,
     auth: httpx.Auth | None = None,
+    fixed_store_path: Path | None = None,
 ) -> None:
     """Run :func:`forward_cursor_store_to_session` under a restart supervisor.
 
@@ -1251,6 +1306,7 @@ async def supervise_cursor_forwarder(
                 launch_epoch_ms=launch_epoch_ms,
                 poll_interval_s=poll_interval_s,
                 auth=auth,
+                **({"fixed_store_path": fixed_store_path} if fixed_store_path is not None else {}),
             )
             _logger.warning(
                 "cursor forwarder returned unexpectedly; restarting; session=%s bridge_dir=%s",

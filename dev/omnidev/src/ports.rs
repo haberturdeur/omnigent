@@ -17,6 +17,11 @@ pub struct Ports {
 }
 
 impl Ports {
+    /// Read a running pod's ports without probing or changing its allocation.
+    pub fn for_client(pod_dir: &Path) -> Result<Ports> {
+        load(pod_dir).context("no valid pod.toml; start omnidev in this checkout first")
+    }
+
     /// Resolve the pod's ports: reuse the persisted pair if still available,
     /// else probe upward from the preferred bases. Explicit overrides (from CLI
     /// flags) are honored verbatim.
@@ -121,4 +126,51 @@ fn save(pod_dir: &Path, ports: &Ports) -> Result<()> {
     let text = toml::to_string(ports).context("serializing pod.toml")?;
     std::fs::write(persist_path(pod_dir), text).context("writing pod.toml")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn client_preserves_persisted_ports() {
+        let dir = std::env::temp_dir().join(format!("omnidev-client-ports-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let original = "server = 6767\nvite = 5173\n";
+        std::fs::write(persist_path(&dir), original).unwrap();
+        let ports = Ports::for_client(&dir).unwrap();
+        assert_eq!(ports.server, 6767);
+        assert_eq!(ports.vite, 5173);
+        assert_eq!(
+            std::fs::read_to_string(persist_path(&dir)).unwrap(),
+            original
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn client_requires_supervisor_allocation() {
+        let dir =
+            std::env::temp_dir().join(format!("omnidev-no-client-ports-{}", std::process::id()));
+        assert!(Ports::for_client(&dir).is_err());
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn client_reuses_ports_occupied_by_supervisor() {
+        let server = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let vite = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let dir = std::env::temp_dir().join(format!("omnidev-busy-client-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let expected = Ports {
+            server: server.local_addr().unwrap().port(),
+            vite: vite.local_addr().unwrap().port(),
+        };
+        save(&dir, &expected).unwrap();
+        let actual = Ports::for_client(&dir).unwrap();
+        assert_eq!(actual.server, expected.server);
+        assert_eq!(actual.vite, expected.vite);
+        assert_eq!(load(&dir).unwrap().server, expected.server);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

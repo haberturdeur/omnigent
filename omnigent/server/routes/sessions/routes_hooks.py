@@ -1241,9 +1241,9 @@ def register_hooks_routes(
         )
         if result is None:
             return Response(status_code=status.HTTP_200_OK)
-        if result.action == "decline":
-            # Explicit user decline: interrupt the native harness before
-            # returning the decline so the abort signal arrives first.
+        if result.action == "decline" and payload.get("native_control") is not True:
+            # Native controls resolve the pending decision themselves; an earlier
+            # interrupt would invalidate that decision before the reply arrives.
             await _forward_session_change_to_runner(
                 session_id,
                 get_server_runner_router(),

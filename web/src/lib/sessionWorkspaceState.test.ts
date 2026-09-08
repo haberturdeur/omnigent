@@ -11,6 +11,10 @@ afterEach(() => {
 });
 
 describe("sessionWorkspaceState", () => {
+  it("restores the selected Todos tab", () => {
+    writeSessionWorkspaceState("conv_todos", { rightRailTab: "todos" });
+    expect(readSessionWorkspaceState("conv_todos").rightRailTab).toBe("todos");
+  });
   it("returns an empty object for an unknown session", () => {
     // No stored entry must read as a clean "fresh session" state, not an error.
     expect(readSessionWorkspaceState("conv_unknown")).toEqual({});
