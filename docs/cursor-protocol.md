@@ -94,14 +94,15 @@ Cursor sessions submit composer messages immediately to the native runtime,
 even during an active turn. Omnigent's local delivery queue is bypassed; the
 strip above the composer polls Cursor's own queued messages. Pending transcript
 metadata is retained for attachment recovery but does not render a second queue.
-Each web prompt carries a trailing correlation marker through Cursor's native
-string queue and transcript. The web queue and mirrored chat hide this marker;
-the server uses it to recover the exact prompt's attachments and author, even
-when queued prompts have identical text or are edited in the terminal. Native
-terminal text without a marker (including prompts queued before this change)
-cannot claim pending attachment metadata. Removing the marker during a terminal
-edit also removes that association. Deleted prompts' unused metadata expires
-through the pending-input TTL.
+A prompt mirrored back from the transcript claims its attachments and author by
+matching the pending entry with the same text, the same way the Kiro pane does.
+Nothing is added to the prompt Cursor receives, so the pane shows exactly what
+was typed. Text typed directly in the terminal matches nothing and stays a plain
+message rather than taking a queued entry's uploads. A prompt edited in the
+terminal before it is sent no longer matches, so it keeps its text but loses the
+attachment association; entries older than a matched one are reported as web
+messages Cursor never recorded. Unused metadata expires through the
+pending-input TTL.
 The **Steer** button promotes the first native follow-up without resubmitting its
 text. It appears only when Cursor exposes native steering, and stale snapshots
 or repeated clicks during promotion are rejected. Cursor owns acknowledgement

@@ -3960,7 +3960,10 @@ async def test_native_dispatch_forwards_without_persisting(wrapper) -> None:
             from omnigent.cursor_native_forwarder import _blob_to_item
             from omnigent.inner.cursor_native_executor import _content_to_text
 
+            # The pane renders the prompt verbatim, so nothing may be appended
+            # to it for the server's own bookkeeping.
             native_text = _content_to_text(forwarded["content"], Path("/tmp/unused"))
+            assert native_text == "hello"
             mirrored = _blob_to_item(
                 1,
                 "prompt",
@@ -3975,9 +3978,14 @@ async def test_native_dispatch_forwards_without_persisting(wrapper) -> None:
                 wrapper,
             )
             assert mirrored is not None
-            assert mirrored.pending_id == result.pending_id
             assert mirrored.item_data["content"] == [{"type": "input_text", "text": "hello"}]
             assert body.data["content"] == [{"type": "input_text", "text": "hello"}]
+            # The mirrored text is what the pending entry is matched on.
+            matched = pending_inputs.resolve_matching_text(
+                "823dbd1aab969b5a813fac59bb977a77", "hello"
+            )
+            assert matched.matched is not None
+            assert matched.matched.pending_id == result.pending_id
     finally:
         pending_inputs.reset_for_tests()
 
@@ -4084,12 +4092,11 @@ async def test_kiro_external_prompt_matches_pending_and_reports_skipped_input() 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("native_text", ["second message", "edited in terminal"])
-@pytest.mark.parametrize("has_identity", [False, True])
 @pytest.mark.parametrize("with_attachment", [False, True])
-@pytest.mark.parametrize("duplicate_text", [False, True])
-async def test_cursor_external_prompt_does_not_inherit_deleted_queue_attachments(
-    native_text, with_attachment, duplicate_text, has_identity
+async def test_cursor_external_prompt_claims_the_queue_entry_with_matching_text(
+    native_text, with_attachment
 ):
+    """A mirrored Cursor prompt takes the uploads of the entry it matches, or none."""
     from omnigent.runtime import pending_inputs
     from omnigent.server.routes.sessions import _persist_external_conversation_item
 
@@ -4102,10 +4109,7 @@ async def test_cursor_external_prompt_does_not_inherit_deleted_queue_attachments
     first_id = pending_inputs.record(
         session_id,
         [
-            {
-                "type": "input_text",
-                "text": "second message" if duplicate_text else "deleted message",
-            },
+            {"type": "input_text", "text": "deleted message"},
             {"type": "input_file", "file_id": "deleted-file", "filename": "deleted.txt"},
         ],
         created_by="alice@example.com",
@@ -4128,24 +4132,90 @@ async def test_cursor_external_prompt_does_not_inherit_deleted_queue_attachments
                 "content": [{"type": "input_text", "text": native_text}],
             },
             "response_id": "cursor:prompt",
-            **({"pending_id": second_id} if has_identity else {}),
+        },
+    )
+    try:
+        await _persist_external_conversation_item(session_id, conv, body, store)
+        if native_text == "edited in terminal":
+            # Text that matches nothing queued — typed or edited in the pane.
+            # It stays a plain message instead of taking someone else's upload.
+            assert len(store.appended_items) == 1
+            assert store.appended_items[0].data.content == [
+                {"type": "input_text", "text": native_text}
+            ]
+            assert store.appended_items[0].created_by is None
+            assert [entry["pending_id"] for entry in pending_inputs.snapshot_for(session_id)] == [
+                first_id,
+                second_id,
+            ]
+            return
+        # The older entry never reached Cursor, so it is reported rather than
+        # silently handing its upload to the prompt that did arrive.
+        assert [item.type for item in store.appended_items] == ["message", "error", "message"]
+        skipped_user, skipped_error, matched_user = store.appended_items
+        assert skipped_user.created_by == "alice@example.com"
+        assert skipped_error.data.code == "cursor_native_prompt_not_recorded"
+        expected = [{"type": "input_text", "text": native_text}]
+        if with_attachment:
+            expected.insert(0, second_file)
+        assert matched_user.data.content == expected
+        assert matched_user.created_by == "bob@example.com"
+        assert pending_inputs.snapshot_for(session_id) == []
+    finally:
+        pending_inputs.reset_for_tests()
+
+
+@pytest.mark.asyncio
+async def test_cursor_queue_entries_with_identical_text_are_claimed_oldest_first():
+    """Identical queued text is correlated by position, the limit of text matching.
+
+    Cursor's transcript carries no id back, so two queued prompts with the same
+    text can only be told apart by queue order. The older entry is claimed first,
+    which is right for a FIFO queue but cannot survive the pair being reordered.
+    """
+    from omnigent.runtime import pending_inputs
+    from omnigent.server.routes.sessions import _persist_external_conversation_item
+
+    pending_inputs.reset_for_tests()
+    store = _ConversationStore()
+    session_id = "823dbd1aab969b5a813fac59bb977a77"
+    conv = store.get_conversation(session_id)
+    assert conv is not None
+    conv.labels["omnigent.wrapper"] = "cursor-native-ui"
+    older_file = {"type": "input_file", "file_id": "older-file", "filename": "older.txt"}
+    pending_inputs.record(
+        session_id,
+        [{"type": "input_text", "text": "same text"}, older_file],
+        created_by="alice@example.com",
+    )
+    newer_id = pending_inputs.record(
+        session_id,
+        [
+            {"type": "input_text", "text": "same text"},
+            {"type": "input_file", "file_id": "newer-file", "filename": "newer.txt"},
+        ],
+        created_by="bob@example.com",
+    )
+    body = SessionEventInput(
+        type="external_conversation_item",
+        data={
+            "item_type": "message",
+            "item_data": {
+                "role": "user",
+                "content": [{"type": "input_text", "text": "same text"}],
+            },
+            "response_id": "cursor:prompt",
         },
     )
     try:
         await _persist_external_conversation_item(session_id, conv, body, store)
         assert len(store.appended_items) == 1
         item = store.appended_items[0]
-        expected = [{"type": "input_text", "text": native_text}]
-        if with_attachment and has_identity:
-            expected.insert(0, second_file)
-        assert item.data.content == expected
-        assert item.created_by == ("bob@example.com" if has_identity else None)
-        if has_identity:
-            assert [entry["pending_id"] for entry in pending_inputs.snapshot_for(session_id)] == [
-                first_id
-            ]
-        else:
-            assert len(pending_inputs.snapshot_for(session_id)) == 2
+        assert item.data.content == [older_file, {"type": "input_text", "text": "same text"}]
+        assert item.created_by == "alice@example.com"
+        assert [entry["pending_id"] for entry in pending_inputs.snapshot_for(session_id)] == [
+            newer_id
+        ]
     finally:
         pending_inputs.reset_for_tests()
 

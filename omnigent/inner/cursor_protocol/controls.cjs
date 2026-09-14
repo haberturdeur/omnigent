@@ -27,8 +27,7 @@ function createControls(emit) {
       throw new Error("Cursor native queue is not ready");
     }
     return { revision: queueRevision,
-      messages: queuedMessages.map((text, index) => ({ index,
-        text: text.replace(/\s*<!-- omnigent-input:pending_[0-9a-f]{32} -->\s*$/, "") })),
+      messages: queuedMessages.map((text, index) => ({ index, text })),
       can_steer: !queueUpdating && current.queuedMessageEmptyInputAction === "steer" };
   };
   const approvalConfig = () => {

@@ -2222,7 +2222,7 @@ async def _persist_external_conversation_item(
     # Claude (not a queued web message) and has no pending entry, so
     # draining for it would hand the queued message's uploads to the marker.
     cleared_pending_id: str | None = None
-    skipped_kiro_pending: list[pending_inputs.DrainedInput] = []
+    skipped_native_pending: list[pending_inputs.DrainedInput] = []
     if (
         item.type == "message"
         and isinstance(item.data, MessageData)
@@ -2230,19 +2230,17 @@ async def _persist_external_conversation_item(
         and not item.data.is_meta
         and not _is_native_interrupt_record(item.data)
     ):
-        if _is_kiro_native_session(conv):
+        if _is_kiro_native_session(conv) or (
+            conv.labels.get("omnigent.wrapper") == CURSOR_NATIVE_WRAPPER_VALUE
+        ):
+            # Both panes accept text typed straight into the terminal, which
+            # arrives here with nothing queued behind it. Draining FIFO would
+            # hand that message a queued entry's uploads and author, so match
+            # the text and leave unrelated entries pending.
             text = _message_text(item.data.content) or ""
             matched = pending_inputs.resolve_matching_text(session_id, text)
             drained = matched.matched
-            skipped_kiro_pending = matched.skipped
-        elif conv.labels.get("omnigent.wrapper") == CURSOR_NATIVE_WRAPPER_VALUE:
-            # Equal prompt text can belong to different files or authors.
-            native_pending_id = body.data.get("pending_id")
-            drained = (
-                pending_inputs.resolve(session_id, native_pending_id)
-                if isinstance(native_pending_id, str)
-                else None
-            )
+            skipped_native_pending = matched.skipped
         else:
             drained = pending_inputs.resolve_oldest(session_id)
         if drained is not None:
@@ -2260,11 +2258,12 @@ async def _persist_external_conversation_item(
             # No pending entry — direct terminal input. Fall back to the
             # identity authenticated on the forwarder's own request.
             item = item.model_copy(update={"created_by": created_by})
-    for skipped in skipped_kiro_pending:
-        await _persist_skipped_kiro_pending_input(
+    for skipped in skipped_native_pending:
+        await _persist_skipped_native_pending_input(
             session_id,
             skipped,
             conversation_store,
+            conv=conv,
         )
     pending_background_title = prepare_background_session_title(
         coordinator=background_title_coordinator,
@@ -2283,12 +2282,14 @@ async def _persist_external_conversation_item(
     return persisted.id
 
 
-async def _persist_skipped_kiro_pending_input(
+async def _persist_skipped_native_pending_input(
     session_id: str,
     skipped: pending_inputs.DrainedInput,
     conversation_store: ConversationStore,
+    *,
+    conv: Conversation,
 ) -> None:
-    """Persist a Kiro web input that never appeared in Kiro's JSONL transcript."""
+    """Persist a web input the native harness never recorded in its transcript."""
     turn_id = generate_task_id()
     user_item = NewConversationItem(
         type="message",
@@ -2296,14 +2297,19 @@ async def _persist_skipped_kiro_pending_input(
         data=MessageData(role="user", content=skipped.content),
         created_by=skipped.created_by,
     )
-    error = ErrorData(
-        source="execution",
-        code="kiro_native_prompt_not_recorded",
-        message=(
+    if _is_kiro_native_session(conv):
+        code = "kiro_native_prompt_not_recorded"
+        message = (
             "Kiro did not accept this web message into its structured session transcript. "
             "The native terminal may have shown the underlying error."
-        ),
-    )
+        )
+    else:
+        code = "cursor_native_prompt_not_recorded"
+        message = (
+            "Cursor did not accept this web message into its session transcript. "
+            "The native terminal may have shown the underlying error."
+        )
+    error = ErrorData(source="execution", code=code, message=message)
     persisted_items = await asyncio.to_thread(
         conversation_store.append,
         session_id,
@@ -5728,26 +5734,11 @@ async def _dispatch_session_event_to_runner_impl(
         # already-running pane.
         forwarded = False
         try:
-            native_body = body
-            if pending_id and conv.labels.get("omnigent.wrapper") == CURSOR_NATIVE_WRAPPER_VALUE:
-                from omnigent.inner.cursor_protocol.prompt_identity import input_marker
-
-                native_body = body.model_copy(
-                    update={
-                        "data": {
-                            **body.data,
-                            "content": [
-                                *body.data["content"],
-                                {"type": "input_text", "text": input_marker(pending_id)},
-                            ],
-                        }
-                    }
-                )
             await _forward_native_terminal_message(
                 runner_client,
                 session_id,
                 conv,
-                native_body,
+                body,
                 file_store=file_store,
                 artifact_store=artifact_store,
                 # The executor speaks the pane's own vocabulary, so it takes the
@@ -9800,7 +9791,7 @@ __all__ = [
     "_persist_native_cumulative_usage",
     "_persist_native_terminal_failure",
     "_persist_session_event",
-    "_persist_skipped_kiro_pending_input",
+    "_persist_skipped_native_pending_input",
     "_publish_and_wait_for_harness_elicitation",
     "_publish_runner_recovered_status",
     "_publish_subtree_cost_to_ancestors",

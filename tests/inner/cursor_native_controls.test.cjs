@@ -53,18 +53,6 @@ test("native queued follow-ups are steered through Cursor's send-now callback", 
   assert.deepEqual(seen, [["steer"]]);
 });
 
-test("queue display hides correlation markers without changing native messages", async () => {
-  const controls = createControls(() => {});
-  const nativeText = `Review this\n\n<!-- omnigent-input:pending_${"a".repeat(32)} -->`;
-  const messages = [nativeText];
-  controls.attach({ value: { queuedMessages: messages } });
-  controls.attach({ getChatId: () => "chat", sendMessage() {}, onAbort() {},
-    queuedMessageEmptyInputAction: "steer", onSendQueuedNow() {} });
-  const snapshot = await controls.dispatch({ action: "get_queue" });
-  assert.deepEqual(snapshot.messages, [{ index: 0, text: "Review this" }]);
-  assert.deepEqual(messages, [nativeText]);
-});
-
 test("tool replies resolve the native store and reject stale decision ids", async () => {
   const controls = createControls(() => {});
   const decisions = [{ id: "decision", operation: { type: "shell", toolCallId: "call" } }];

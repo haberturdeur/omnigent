@@ -52,7 +52,6 @@ import httpx
 from omnigent import cursor_native_status
 from omnigent._native_post_delivery import post_may_have_been_delivered
 from omnigent.cursor_native_bridge import FORK_HISTORY_CLOSE_TAG, FORK_HISTORY_OPEN_TAG
-from omnigent.inner.cursor_protocol.prompt_identity import split_input_marker
 from omnigent.inner.native_attachments import ATTACHMENT_MARKER_STRIP_PATTERN
 
 _logger = logging.getLogger(__name__)
@@ -515,7 +514,6 @@ class _MirrorItem:
     item_data: dict[str, object]
     response_id: str
     last_in_row: bool = True
-    pending_id: str | None = None
 
 
 def _read_blob_rows(store_path: Path, last_rowid: int) -> list[tuple[int, str, object]]:
@@ -814,13 +812,11 @@ def _blob_to_item(rowid: int, blob_id: str, data: object, agent_name: str) -> _M
         prompt = _unwrap_user_query(_content_text(content))
         if not prompt:
             return None
-        prompt, pending_id = split_input_marker(prompt)
         return _MirrorItem(
             rowid=rowid,
             item_type="message",
             item_data={"role": "user", "content": [{"type": "input_text", "text": prompt}]},
             response_id=response_id,
-            pending_id=pending_id,
         )
     if role == "assistant":
         text = _content_text(obj.get("content")).strip()
@@ -902,7 +898,6 @@ async def _post_conversation_item(
                 "item_type": item.item_type,
                 "item_data": item.item_data,
                 "response_id": item.response_id,
-                **({"pending_id": item.pending_id} if item.pending_id is not None else {}),
             },
         },
     )

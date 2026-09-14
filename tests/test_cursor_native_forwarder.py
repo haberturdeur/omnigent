@@ -751,15 +751,13 @@ class TestPostModelChangeIfNew:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("pending_id", [None, "pending_" + "a" * 32])
-async def test_post_conversation_item_shape(pending_id) -> None:
+async def test_post_conversation_item_shape() -> None:
     client = _RecordingClient()
     item = fwd._MirrorItem(
         rowid=5,
         item_type="message",
         item_data={"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
         response_id="cursor:bid",
-        pending_id=pending_id,
     )
     await fwd._post_conversation_item(client, session_id="conv_1", item=item)  # type: ignore[arg-type]
     url, body = client.posts[0]
@@ -769,7 +767,6 @@ async def test_post_conversation_item_shape(pending_id) -> None:
         "item_type": "message",
         "item_data": {"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
         "response_id": "cursor:bid",
-        **({"pending_id": pending_id} if pending_id else {}),
     }
 
 
