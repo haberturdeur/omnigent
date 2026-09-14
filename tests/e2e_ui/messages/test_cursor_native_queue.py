@@ -8,6 +8,53 @@ from playwright.sync_api import Page, Route, expect
 from .test_message_render_parity import _ensure_chat_view
 
 
+def test_cursor_queue_unavailable_notice_stays_visible_during_polling(
+    page: Page, seeded_session: tuple[str, str]
+) -> None:
+    base_url, session_id = seeded_session
+    pending: list[Route] = []
+    first_request = True
+
+    def session_snapshot(route: Route) -> None:
+        response = route.fetch()
+        body = response.json()
+        body["harness"] = "cursor-native"
+        route.fulfill(response=response, json=body)
+
+    def queue_control(route: Route) -> None:
+        nonlocal first_request
+        if first_request:
+            first_request = False
+            route.fulfill(status=503, json={"error": "offline"})
+        else:
+            pending.append(route)
+
+    queue_url = f"**/v1/sessions/{session_id}/cursor-queue"
+    page.route(re.compile(rf"/v1/sessions/{session_id}(\?.*)?$"), session_snapshot)
+    page.route(queue_url, queue_control)
+    page.goto(f"{base_url}/c/{session_id}")
+    _ensure_chat_view(page)
+    notice = page.get_by_role("status").filter(has_text="Cursor’s queue is unavailable.")
+    expect(notice).to_be_visible()
+    original = notice.element_handle()
+    assert original is not None
+
+    for recover in (False, True):
+        with page.expect_request(queue_url):
+            pass
+        expect(notice).to_be_visible()
+        assert original.evaluate("element => element.isConnected")
+        route = pending.pop(0)
+        if recover:
+            route.fulfill(json={"revision": "recovered", "messages": [], "can_steer": False})
+        else:
+            route.fulfill(status=503, json={"error": "still offline"})
+            expect(notice).to_be_visible()
+            assert original.evaluate("element => element.isConnected")
+
+    expect(notice).to_have_count(0)
+
+
 def test_cursor_native_queue_bypasses_local_delivery_queue(
     page: Page, seeded_session: tuple[str, str], tmp_path: Path
 ) -> None:

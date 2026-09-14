@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { authenticatedFetch } from "@/lib/identity";
@@ -43,6 +43,44 @@ const snapshot = {
 };
 
 describe("Cursor's native queue", () => {
+  it("keeps the unavailable notice mounted during polls until a successful response", async () => {
+    vi.mocked(authenticatedFetch).mockResolvedValueOnce(
+      Response.json({ error: "offline" }, { status: 503 }),
+    );
+    const client = mount();
+    const notice = await screen.findByRole("status");
+
+    async function pollWith(response: Response) {
+      let finishPoll!: (response: Response) => void;
+      vi.mocked(authenticatedFetch).mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishPoll = resolve;
+          }),
+      );
+      let poll!: Promise<void>;
+      await act(async () => {
+        poll = client.refetchQueries({ queryKey: ["cursor-queue", "cursor-session"] });
+        await new Promise((resolve) => {
+          setTimeout(resolve, 0);
+        });
+      });
+      expect(screen.getByRole("status")).toBe(notice);
+      await act(async () => {
+        finishPoll(response);
+        await poll;
+        await new Promise((resolve) => {
+          setTimeout(resolve, 0);
+        });
+      });
+      if (!response.ok) expect(screen.getByRole("status")).toBe(notice);
+    }
+    await pollWith(Response.json({ error: "still offline" }, { status: 503 }));
+    await pollWith(Response.json(snapshot));
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.getByText("change direction")).toBeInTheDocument();
+  });
+
   it("steers the native head without resubmitting text and refreshes the native queue", async () => {
     let queue = snapshot;
     const requests: RequestInit[] = [];

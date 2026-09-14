@@ -17,7 +17,8 @@ export function CursorQueuedMessages({
   const { query, update } = useCursorQueue(sessionId);
   const queue = query.data;
 
-  if (query.isError) {
+  // Retrying an initial failure becomes pending before availability is known.
+  if (query.isError || (query.isPending && query.errorUpdatedAt > 0)) {
     return (
       <p role="status" className="text-center text-sm text-muted-foreground">
         Cursor’s queue is unavailable.
