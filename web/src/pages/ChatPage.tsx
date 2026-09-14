@@ -72,6 +72,7 @@ import { useAppName } from "@/lib/branding";
 import { StreamBudgetBanner } from "@/components/StreamBudgetBanner";
 import { cn } from "@/lib/utils";
 import { QueuedMessagesStrip } from "@/pages/QueuedMessagesStrip";
+import { CursorQueuedMessages } from "@/pages/CursorQueuedMessages";
 import { TranscriptScrollbar } from "@/pages/TranscriptScrollbar";
 import { TurnRail, type Turn } from "@/pages/TurnRail";
 import { attachmentKey, validateAttachments } from "@/lib/attachments";
@@ -644,7 +645,8 @@ export function shouldShowAuthorBadge(
  * Queue when busy, or when this conversation already has a queued message even
  * if it reads idle: the direct-send and queue-drain paths aren't ordered, so a
  * later direct send could overtake a still-queued earlier one when status
- * flickers idle mid-queue (cursor-native). A new chat always sends.
+ * flickers idle mid-queue. A new chat always sends. Cursor sends directly
+ * because its native runtime owns queuing and steering.
  *
  * ``waiting`` is NOT busy for queueing: it means the turn already ended and the
  * agent loop is only parked on background work (background shells / sub-agents)
@@ -665,8 +667,10 @@ export function shouldQueueSend(
   sessionStatus: SessionStatus,
   queuedMessages: QueuedMessage[],
   alwaysSteer = false,
+  sessionHarness: string | null = null,
 ): boolean {
   if (conversationId === null) return false;
+  if (sessionHarness === "cursor-native") return false;
   const hasQueued = queuedMessages.some((m) => m.conversationId === conversationId);
   if (alwaysSteer) return hasQueued;
   const isBusy = status === "streaming" || sessionStatus === "running";
@@ -807,6 +811,7 @@ export function ChatPage() {
   // field changes — no `useShallow` needed.
   const blocks = useChatStore((s) => s.blocks);
   const pendingUserMessages = useChatStore((s) => s.pendingUserMessages);
+  const nativeCursorQueue = useChatStore((s) => s.sessionHarness === "cursor-native");
   const activeResponse = useChatStore((s) => s.activeResponse);
   const interruptedResponseIds = useChatStore((s) => s.interruptedResponseIds);
   const status = useChatStore((s) => s.status);
@@ -879,7 +884,7 @@ export function ChatPage() {
     // position (see chatStore), so they render in-order with later tool /
     // elicitation cards. The optimistic pending user message trails too,
     // except when the timeline ends in a REQUEST-phase elicitation card.
-    if (pendingUserMessages.length === 0) return committed;
+    if (pendingUserMessages.length === 0 || nativeCursorQueue) return committed;
     return mergePendingBubbles(
       committed,
       buildPendingBubbles(pendingUserMessages, getCurrentAuthorId()),
@@ -889,6 +894,7 @@ export function ChatPage() {
     activeResponse,
     interruptedResponseIds,
     pendingUserMessages,
+    nativeCursorQueue,
     subagentRoutingOverride,
     sessionStatus,
   ]);
@@ -1267,6 +1273,7 @@ export function ChatPage() {
         chat.sessionStatus,
         chat.queuedMessages,
         readAlwaysSteer(),
+        chat.sessionHarness,
       )
     ) {
       chat.enqueueMessage(text, files);
@@ -5207,25 +5214,33 @@ export function Composer({
       {/* Queued messages — peeks above the card like the sub-agent tray.
           Lists follow-ups held while the agent is busy; drains FIFO on idle.
           Scope to this conversation so a queue held elsewhere never leaks in. */}
-      <QueuedMessagesStrip
-        messages={queuedMessages.filter((m) => m.conversationId === conversationId)}
-        onDelete={dequeueMessage}
-        onEdit={(queueId) => {
-          // Pull the queued message back into the composer for editing:
-          // replace the composer's text + attachments with the queued
-          // message's, remove it from the queue, and focus the textarea.
-          // Re-sending re-queues it (busy) or sends it (idle).
-          const target = queuedMessages.find((m) => m.queueId === queueId);
-          if (!target) return;
-          setValue(target.text);
-          setFiles(target.files ?? []);
-          dequeueMessage(queueId);
-          textareaRef.current?.focus();
-        }}
-        onSteer={(queueId) => steerMessage(queueId)}
-        onReorder={reorderQueuedMessage}
-        widthClassName={CHAT_COLUMN_WIDTH}
-      />
+      {sessionHarness === "cursor-native" && conversationId ? (
+        <CursorQueuedMessages
+          sessionId={conversationId}
+          widthClassName={CHAT_COLUMN_WIDTH}
+          readOnly={isReadOnly || readOnlyReason !== null}
+        />
+      ) : (
+        <QueuedMessagesStrip
+          messages={queuedMessages.filter((m) => m.conversationId === conversationId)}
+          onDelete={dequeueMessage}
+          onEdit={(queueId) => {
+            // Pull the queued message back into the composer for editing:
+            // replace the composer's text + attachments with the queued
+            // message's, remove it from the queue, and focus the textarea.
+            // Re-sending re-queues it (busy) or sends it (idle).
+            const target = queuedMessages.find((m) => m.queueId === queueId);
+            if (!target) return;
+            setValue(target.text);
+            setFiles(target.files ?? []);
+            dequeueMessage(queueId);
+            textareaRef.current?.focus();
+          }}
+          onSteer={(queueId) => steerMessage(queueId)}
+          onReorder={reorderQueuedMessage}
+          widthClassName={CHAT_COLUMN_WIDTH}
+        />
+      )}
       {/* Sub-agent context tray — peeks above the card; reserves its own
           layout slot so the card sits below it (see SubagentComposerTray).
           Truthy (not just non-null) so an empty label never peeks a

@@ -3909,8 +3909,9 @@ async def test_native_dispatch_fast_fails_and_consumes_message_on_terminal_error
 
 
 @pytest.mark.asyncio
-async def test_kiro_native_dispatch_forwards_without_persisting() -> None:
-    """Kiro web-chat input is mirrored by Kiro's session forwarder."""
+@pytest.mark.parametrize("wrapper", ["kiro-native-ui", "cursor-native-ui"])
+async def test_native_dispatch_forwards_without_persisting(wrapper) -> None:
+    """Native web-chat input is mirrored by its session forwarder."""
     from omnigent.runtime import pending_inputs
     from omnigent.server.routes.sessions import _dispatch_session_event_to_runner
 
@@ -3918,6 +3919,7 @@ async def test_kiro_native_dispatch_forwards_without_persisting() -> None:
     store = _ConversationStore()
     conv = store.get_conversation("823dbd1aab969b5a813fac59bb977a77")
     assert conv is not None
+    conv.labels["omnigent.wrapper"] = wrapper
     client = _FakeRunnerClient()
     body = SessionEventInput(
         type="message",
@@ -3931,7 +3933,7 @@ async def test_kiro_native_dispatch_forwards_without_persisting() -> None:
             body,
             store,  # type: ignore[arg-type]
             client,  # type: ignore[arg-type]
-            agent_name="kiro-native-ui",
+            agent_name=wrapper,
             file_store=None,
             artifact_store=None,
             created_by="alice@example.com",
@@ -3950,7 +3952,32 @@ async def test_kiro_native_dispatch_forwards_without_persisting() -> None:
         assert store.appended_items == []
         forwarded = client.post_json_calls[1][1]
         assert forwarded["agent_id"] == "2c515637c67d0717ad0bebc2747b71bc"
-        assert forwarded["model"] == "kiro-native-ui"
+        assert forwarded["model"] == wrapper
+        if wrapper == "cursor-native-ui":
+            import json
+            from pathlib import Path
+
+            from omnigent.cursor_native_forwarder import _blob_to_item
+            from omnigent.inner.cursor_native_executor import _content_to_text
+
+            native_text = _content_to_text(forwarded["content"], Path("/tmp/unused"))
+            mirrored = _blob_to_item(
+                1,
+                "prompt",
+                json.dumps(
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": f"<user_query>{native_text}</user_query>"}
+                        ],
+                    }
+                ),
+                wrapper,
+            )
+            assert mirrored is not None
+            assert mirrored.pending_id == result.pending_id
+            assert mirrored.item_data["content"] == [{"type": "input_text", "text": "hello"}]
+            assert body.data["content"] == [{"type": "input_text", "text": "hello"}]
     finally:
         pending_inputs.reset_for_tests()
 
@@ -4051,6 +4078,74 @@ async def test_kiro_external_prompt_matches_pending_and_reports_skipped_input() 
         assert matched_user.data.content == [{"type": "input_text", "text": "tell me a joke"}]
         assert matched_user.created_by == "alice@example.com"
         assert first != second
+    finally:
+        pending_inputs.reset_for_tests()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native_text", ["second message", "edited in terminal"])
+@pytest.mark.parametrize("has_identity", [False, True])
+@pytest.mark.parametrize("with_attachment", [False, True])
+@pytest.mark.parametrize("duplicate_text", [False, True])
+async def test_cursor_external_prompt_does_not_inherit_deleted_queue_attachments(
+    native_text, with_attachment, duplicate_text, has_identity
+):
+    from omnigent.runtime import pending_inputs
+    from omnigent.server.routes.sessions import _persist_external_conversation_item
+
+    pending_inputs.reset_for_tests()
+    store = _ConversationStore()
+    session_id = "823dbd1aab969b5a813fac59bb977a77"
+    conv = store.get_conversation(session_id)
+    assert conv is not None
+    conv.labels["omnigent.wrapper"] = "cursor-native-ui"
+    first_id = pending_inputs.record(
+        session_id,
+        [
+            {
+                "type": "input_text",
+                "text": "second message" if duplicate_text else "deleted message",
+            },
+            {"type": "input_file", "file_id": "deleted-file", "filename": "deleted.txt"},
+        ],
+        created_by="alice@example.com",
+    )
+    second_content = [{"type": "input_text", "text": "second message"}]
+    second_file = {"type": "input_file", "file_id": "second-file", "filename": "second.txt"}
+    if with_attachment:
+        second_content.append(second_file)
+    second_id = pending_inputs.record(
+        session_id,
+        second_content,
+        created_by="bob@example.com",
+    )
+    body = SessionEventInput(
+        type="external_conversation_item",
+        data={
+            "item_type": "message",
+            "item_data": {
+                "role": "user",
+                "content": [{"type": "input_text", "text": native_text}],
+            },
+            "response_id": "cursor:prompt",
+            **({"pending_id": second_id} if has_identity else {}),
+        },
+    )
+    try:
+        await _persist_external_conversation_item(session_id, conv, body, store)
+        assert len(store.appended_items) == 1
+        item = store.appended_items[0]
+        expected = [{"type": "input_text", "text": native_text}]
+        if with_attachment and has_identity:
+            expected.insert(0, second_file)
+        assert item.data.content == expected
+        assert item.created_by == ("bob@example.com" if has_identity else None)
+        if has_identity:
+            assert [entry["pending_id"] for entry in pending_inputs.snapshot_for(session_id)] == [
+                first_id
+            ]
+        else:
+            assert len(pending_inputs.snapshot_for(session_id)) == 2
     finally:
         pending_inputs.reset_for_tests()
 

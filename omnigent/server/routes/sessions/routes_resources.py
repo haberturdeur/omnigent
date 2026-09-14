@@ -121,6 +121,29 @@ def register_resources_routes(
         )
         return JSONResponse(content=config, headers={"Cache-Control": "no-store"})
 
+    @router.get("/sessions/{session_id}/cursor-queue", response_model=None)
+    async def get_cursor_queue(request: Request, session_id: str) -> JSONResponse:
+        conversation = await _validate_session(session_id, request, LEVEL_READ)
+        queue = await _proxy_get_to_runner(
+            session_id, f"/v1/sessions/{session_id}/cursor-queue", conversation
+        )
+        return JSONResponse(content=queue, headers={"Cache-Control": "no-store"})
+
+    @router.post(
+        "/sessions/{session_id}/cursor-queue",
+        response_model=None,
+        dependencies=[Depends(require_json_content_type)],
+    )
+    async def update_cursor_queue(request: Request, session_id: str) -> JSONResponse:
+        conversation = await _validate_session(session_id, request, LEVEL_EDIT)
+        status, payload = await _proxy_post_to_runner(
+            session_id,
+            f"/v1/sessions/{session_id}/cursor-queue",
+            await request.json(),
+            conversation,
+        )
+        return JSONResponse(status_code=status, content=payload)
+
     @router.get(
         "/sessions/{session_id}/resources",
         response_model=SessionResourcePaginatedList,

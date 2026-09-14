@@ -39,6 +39,32 @@ test("native submit works before any agent run and keeps React output unchanged"
   assert.deepEqual(seen, ["first\nmessage"]);
 });
 
+test("native queued follow-ups are steered through Cursor's send-now callback", async () => {
+  const controls = createControls(() => {});
+  const seen = [];
+  controls.attach({ value: { queuedMessages: ["change direction", "later"] } });
+  controls.attach({ getChatId: () => "chat", sendMessage: text => seen.push(["followup", text]),
+    onAbort() {}, queuedMessageEmptyInputAction: "steer",
+    onSendQueuedNow: () => seen.push(["steer"]),
+    onQueuedMessageEditChange() {}, onQueuedMessageEditDelete() {} });
+  const queue = await controls.dispatch({ action: "get_queue" });
+  assert.deepEqual(queue.messages, [{ index: 0, text: "change direction" }, { index: 1, text: "later" }]);
+  await controls.dispatch({ action: "steer_queue", index: 0, revision: queue.revision });
+  assert.deepEqual(seen, [["steer"]]);
+});
+
+test("queue display hides correlation markers without changing native messages", async () => {
+  const controls = createControls(() => {});
+  const nativeText = `Review this\n\n<!-- omnigent-input:pending_${"a".repeat(32)} -->`;
+  const messages = [nativeText];
+  controls.attach({ value: { queuedMessages: messages } });
+  controls.attach({ getChatId: () => "chat", sendMessage() {}, onAbort() {},
+    queuedMessageEmptyInputAction: "steer", onSendQueuedNow() {} });
+  const snapshot = await controls.dispatch({ action: "get_queue" });
+  assert.deepEqual(snapshot.messages, [{ index: 0, text: "Review this" }]);
+  assert.deepEqual(messages, [nativeText]);
+});
+
 test("tool replies resolve the native store and reject stale decision ids", async () => {
   const controls = createControls(() => {});
   const decisions = [{ id: "decision", operation: { type: "shell", toolCallId: "call" } }];
@@ -118,4 +144,51 @@ test("asynchronous command failures remain observable after submission is acknow
   assert.equal(error.message.message, "Submission failed");
   assert.equal(error.conversationId, "chat");
   assert.equal(error.root, true);
+});
+
+test("steering rejects stale queues, non-head rows, and native interrupt/send modes", async () => {
+  const controls = createControls(() => {});
+  let calls = 0;
+  const props = { getChatId: () => "chat", sendMessage() { throw Error("resubmitted"); }, onAbort() {},
+    onSendQueuedNow: () => calls++, queuedMessageEmptyInputAction: "steer" };
+  controls.attach(props);
+  controls.attach({ value: { queuedMessages: ["same", "same"] } });
+  const first = await controls.dispatch({ action: "get_queue" });
+  for (const index of [1, -1, "0", null]) {
+    await assert.rejects(controls.dispatch({ action: "steer_queue", revision: first.revision, index }), /first queued/);
+  }
+  controls.attach({ value: { queuedMessages: ["same"] } });
+  await assert.rejects(controls.dispatch({ action: "steer_queue", revision: first.revision, index: 0 }), /queue changed/);
+  for (const mode of ["send-now", "interrupt-and-send", undefined]) {
+    controls.attach({ ...props, queuedMessageEmptyInputAction: mode });
+    const queue = await controls.dispatch({ action: "get_queue" });
+    assert.equal(queue.can_steer, false);
+    await assert.rejects(controls.dispatch({ action: "steer_queue", revision: queue.revision, index: 0 }), /first queued/);
+  }
+  controls.attach(props);
+  const ready = await controls.dispatch({ action: "get_queue" });
+  await controls.dispatch({ action: "steer_queue", revision: ready.revision, index: 0 });
+  const pending = await controls.dispatch({ action: "get_queue" });
+  assert.equal(pending.can_steer, false);
+  await assert.rejects(controls.dispatch({ action: "steer_queue", revision: pending.revision, index: 0 }), /queue changed/);
+  assert.equal(calls, 1);
+  controls.attach({ value: { queuedMessages: [] } });
+  const empty = await controls.dispatch({ action: "get_queue" });
+  await assert.rejects(controls.dispatch({ action: "steer_queue", revision: empty.revision, index: 0 }), /first queued/);
+});
+
+test("native queue state is required and asynchronous promotion errors allow retry", async () => {
+  const events = [];
+  const controls = createControls(event => events.push(event));
+  await assert.rejects(controls.dispatch({ action: "get_queue" }), /not ready/);
+  controls.attach({ getChatId: () => "chat", sendMessage() {}, onAbort() {},
+    queuedMessageEmptyInputAction: "steer", onSendQueuedNow: async () => { throw Error("failed"); } });
+  controls.attach({ value: { queuedMessages: ["retry"] } });
+  const queue = await controls.dispatch({ action: "get_queue" });
+  await controls.dispatch({ action: "steer_queue", revision: queue.revision, index: 0 });
+  await new Promise(setImmediate);
+  const retry = await controls.dispatch({ action: "get_queue" });
+  assert.equal(retry.can_steer, true);
+  assert.notEqual(retry.revision, queue.revision);
+  assert.equal(events.at(-1).kind, "command_error");
 });

@@ -24,6 +24,7 @@ from fastapi import (
 from fastapi.responses import Response
 from pydantic import ValidationError
 
+from omnigent._wrapper_labels import CURSOR_NATIVE_WRAPPER_VALUE
 from omnigent.cli_invocation import cli_invocation
 from omnigent.db.utils import generate_agent_id, generate_task_id
 from omnigent.debug_logging import debug_event
@@ -2234,6 +2235,14 @@ async def _persist_external_conversation_item(
             matched = pending_inputs.resolve_matching_text(session_id, text)
             drained = matched.matched
             skipped_kiro_pending = matched.skipped
+        elif conv.labels.get("omnigent.wrapper") == CURSOR_NATIVE_WRAPPER_VALUE:
+            # Equal prompt text can belong to different files or authors.
+            native_pending_id = body.data.get("pending_id")
+            drained = (
+                pending_inputs.resolve(session_id, native_pending_id)
+                if isinstance(native_pending_id, str)
+                else None
+            )
         else:
             drained = pending_inputs.resolve_oldest(session_id)
         if drained is not None:
@@ -5719,11 +5728,26 @@ async def _dispatch_session_event_to_runner_impl(
         # already-running pane.
         forwarded = False
         try:
+            native_body = body
+            if pending_id and conv.labels.get("omnigent.wrapper") == CURSOR_NATIVE_WRAPPER_VALUE:
+                from omnigent.inner.cursor_protocol.prompt_identity import input_marker
+
+                native_body = body.model_copy(
+                    update={
+                        "data": {
+                            **body.data,
+                            "content": [
+                                *body.data["content"],
+                                {"type": "input_text", "text": input_marker(pending_id)},
+                            ],
+                        }
+                    }
+                )
             await _forward_native_terminal_message(
                 runner_client,
                 session_id,
                 conv,
-                body,
+                native_body,
                 file_store=file_store,
                 artifact_store=artifact_store,
                 # The executor speaks the pane's own vocabulary, so it takes the

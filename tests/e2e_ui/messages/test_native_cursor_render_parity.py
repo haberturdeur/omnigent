@@ -59,6 +59,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import threading
@@ -341,6 +342,48 @@ def _seed_cursor_store(store_path: Path, user_marker: str, assistant_token: str)
             },
         ),
         (
+            hashlib.sha256(b"cursor-mirror-tools").hexdigest(),
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool-call",
+                        "toolCallId": "cursor-shell",
+                        "toolName": "Shell",
+                        "args": {"command": "printf cursor-tool-output"},
+                    },
+                    {
+                        "type": "tool-call",
+                        "toolCallId": "cursor-edit",
+                        "toolName": "StrReplace",
+                        "args": {
+                            "path": "/tmp/cursor-demo.py",
+                            "old_string": "before",
+                            "new_string": "after",
+                        },
+                    },
+                ],
+            },
+        ),
+        (
+            hashlib.sha256(b"cursor-mirror-tool-results").hexdigest(),
+            {
+                "role": "tool",
+                "content": [
+                    {
+                        "type": "tool-result",
+                        "toolCallId": "cursor-shell",
+                        "result": "cursor-tool-output",
+                    },
+                    {
+                        "type": "tool-result",
+                        "toolCallId": "cursor-edit",
+                        "result": "cursor-edit-complete",
+                    },
+                ],
+            },
+        ),
+        (
             hashlib.sha256(b"cursor-mirror-assistant").hexdigest(),
             {"role": "assistant", "content": [{"type": "text", "text": assistant_token}]},
         ),
@@ -498,3 +541,24 @@ def test_native_cursor_mirror_renders_without_live_agent(
     expect(page.locator(_ASSISTANT, has_text=assistant_token)).to_have_count(1)
     # …and match the canonical transcript the TUI renders from, once and in order.
     _assert_transcript_parity(base_url, session_id, [user_marker], [assistant_token])
+
+    # Saved native calls render through the same expandable cards as live tools.
+    for reload in (False, True):
+        if reload:
+            page.reload()
+            _ensure_chat_view(page)
+        worked = page.get_by_role("button", name=re.compile(r"^Worked for"))
+        expect(worked).to_be_visible()
+        worked.click()
+        summary = page.get_by_role("button", name="Ran 1 shell command, edited 1 file", exact=True)
+        if summary.count():
+            summary.click()
+        shell = page.get_by_title("printf cursor-tool-output", exact=True)
+        edit = page.get_by_title("Edit /tmp/cursor-demo.py", exact=True)
+        expect(shell).to_have_count(1)
+        expect(edit).to_have_count(1)
+        shell.click()
+        expect(page.get_by_text("cursor-tool-output", exact=True)).to_be_visible()
+        edit.click()
+        expect(page.get_by_text("cursor-edit-complete", exact=True)).to_be_visible()
+    page.screenshot(path=str(tmp_path / "cursor-tool-cards.png"), full_page=True)

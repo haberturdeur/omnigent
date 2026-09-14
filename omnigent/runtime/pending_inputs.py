@@ -32,7 +32,7 @@ sender can adopt it and dedupe cleanly), and draining needs to run at
 the persist site so the ``session.input.consumed`` event can carry the
 cleared id. Both are caller-driven, so the access is explicit.
 
-Draining is by FIFO order (oldest first), NOT by text. Native gives no
+Most native transports drain by FIFO order (oldest first), NOT by text. They give no
 id channel back through the TUI to correlate the forwarded POST with the
 mirrored transcript item, and the transcript freely reformats the text
 (reply-quote ``>`` blockquotes, ``[Attached:]`` markers, whitespace), so
@@ -40,6 +40,12 @@ matching on text is unreliable — it would leave a reformatted message
 stuck pending and double-rendered. Per-session SSE ordering guarantees
 the i-th persisted user message corresponds to the i-th queued one, so
 each persisted native user message drains the oldest pending entry.
+
+Cursor carries the pending id through its prompt and transcript, so it drains
+only that entry via :func:`resolve`; queue deletion and identical prompt text
+cannot change which attachments or author are recovered. Unmarked Cursor
+messages do not drain pending entries. Kiro matches structured prompt text via
+:func:`resolve_matching_text`.
 
 The one imperfect case is interleaving a web-composer message with a
 message typed directly in the TUI: the TUI message (which has no pending
@@ -96,7 +102,7 @@ def _now() -> float:
 @dataclass
 class DrainedInput:
     """
-    The pending entry drained by :func:`resolve_oldest`.
+    Metadata removed from the pending-input index by a resolver.
 
     :param pending_id: The drained entry's id, e.g. ``"pending_a1b2c3"``
         — echoed to clients as ``cleared_pending_id`` so they drop the
@@ -221,26 +227,30 @@ def record(
     return pending_id
 
 
-def resolve(conversation_id: str, pending_id: str) -> None:
+def resolve(conversation_id: str, pending_id: str) -> DrainedInput | None:
     """
-    Drop a pending entry by id.
+    Remove a pending entry by id and return its metadata.
 
     Called to roll back a :func:`record` whose runner forward failed
     (so a never-delivered message doesn't replay as a ghost bubble).
+    Cursor also uses it to recover metadata by the id mirrored in its transcript.
     Idempotent: dropping an unknown id is a no-op.
 
     :param conversation_id: Conversation/session id, e.g.
         ``"conv_abc123"``.
     :param pending_id: The id returned by :func:`record`, e.g.
         ``"pending_a1b2c3"``.
+    :returns: The removed entry, or ``None`` for an unknown or expired id.
     """
     with _lock:
+        _evict_stale_locked(conversation_id, _now())
         entries = _pending.get(conversation_id)
         if entries is None:
-            return
-        entries.pop(pending_id, None)
+            return None
+        entry = entries.pop(pending_id, None)
         if not entries:
             _pending.pop(conversation_id, None)
+        return _drained_input(entry) if entry is not None else None
 
 
 def resolve_oldest(conversation_id: str) -> DrainedInput | None:
@@ -296,7 +306,7 @@ def resolve_matching_text(conversation_id: str, text: str) -> MatchedDrain:
     the caller can surface them as failed web injections.
 
     :param conversation_id: Conversation/session id, e.g. ``"conv_abc123"``.
-    :param text: Accepted prompt text mirrored from Kiro's structured JSONL.
+    :param text: Accepted prompt text mirrored from the native transcript.
     :returns: Matched entry plus older skipped entries, or no match with an
         empty skipped list when the text was typed directly in the TUI.
     """

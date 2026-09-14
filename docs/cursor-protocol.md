@@ -78,7 +78,9 @@ error and never falls back to typing the action again.
 
 | Operation | Native behavior |
 | --- | --- |
-| First prompt, follow-up, steering | TUI's `sendMessage` callback |
+| First prompt, follow-up | TUI's `sendMessage` callback |
+| Queue display | TUI's native `queuedMessages` state |
+| Steer queued head | TUI's `onSendQueuedNow` callback when native action is `steer` |
 | Stop | TUI's native abort callback |
 | Compact | TUI's summarize callback, including while idle |
 | Model picker | Native model selection callback |
@@ -87,6 +89,24 @@ error and never falls back to typing the action again.
 | Web and mode-switch decisions | Native dialog callbacks |
 | Todo list | Native persisted checkpoints, with todo blobs decoded by Cursor |
 | Subagent chats | Native child IDs registered as child sessions, with saved user/assistant text mirrored from each child's store |
+
+Cursor sessions submit composer messages immediately to the native runtime,
+even during an active turn. Omnigent's local delivery queue is bypassed; the
+strip above the composer polls Cursor's own queued messages. Pending transcript
+metadata is retained for attachment recovery but does not render a second queue.
+Each web prompt carries a trailing correlation marker through Cursor's native
+string queue and transcript. The web queue and mirrored chat hide this marker;
+the server uses it to recover the exact prompt's attachments and author, even
+when queued prompts have identical text or are edited in the terminal. Native
+terminal text without a marker (including prompts queued before this change)
+cannot claim pending attachment metadata. Removing the marker during a terminal
+edit also removes that association. Deleted prompts' unused metadata expires
+through the pending-input TTL.
+The **Steer** button promotes the first native follow-up without resubmitting its
+text. It appears only when Cursor exposes native steering, and stale snapshots
+or repeated clicks during promotion are rejected. Cursor owns acknowledgement
+and any fallback behavior. Edit, delete, and other native queue actions remain
+available in Cursor's terminal.
 
 In protocol mode these operations do not send tmux commands. The old
 keystroke-based approval mirror is disabled. Tmux hosts and renders the TUI;
@@ -97,6 +117,10 @@ items or token accounting.
 The transcript mirror binds to the live native chat ID instead of choosing a
 workspace store by creation time. Older discovery-based mirrors yield to that
 owner. When attaching, it replays saved messages after its last delivered row.
+Saved tool calls and results are mirrored as expandable chat cards, including
+shell commands and file edits. Delivery also tracks progress within a row so a
+restart or retry preserves messages containing several tools without duplicates.
+Cards appear when Cursor commits their transcript records to its chat store.
 
 Native decisions are mirrored from the current pending-state snapshot and
 cleared when answered in either interface. Stale ids are rejected. A web decline
@@ -144,12 +168,12 @@ Checkpoint observation failures are logged without aborting Cursor's run.
 Asynchronous native command failures are forwarded as failed-session events,
 with delivery retried if the server is temporarily unavailable.
 
-Subagent chats replay existing user/assistant text and then follow new messages.
+Subagent chats replay existing messages, tool calls and results, then follow new records.
 Each child has a separate persisted delivery cursor and is bound to its exact
 native store, never discovered by workspace recency.
 
 This is not yet full Codex feature parity. Plan-build/revision UI, checkpoint
-selection, and subagent tool/reasoning/live-status mirroring remain incomplete. The
+selection, and subagent reasoning/live-status mirroring remain incomplete. The
 adapter relies on private callback shapes and must be revalidated for every
 supported Cursor build. Prompt acknowledgements mean dispatch into Cursor's
 native handler, not confirmation that the backend accepted or completed the turn.

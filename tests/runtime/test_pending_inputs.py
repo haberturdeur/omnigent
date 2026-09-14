@@ -234,10 +234,13 @@ def test_resolve_removes_entry_idempotently() -> None:
     keep = pending_inputs.record("conv_a", [_text_block("keep")])
     drop = pending_inputs.record("conv_a", [_text_block("drop")])
 
-    pending_inputs.resolve("conv_a", drop)
+    drained = pending_inputs.resolve("conv_a", drop)
+    assert drained is not None
+    assert drained.pending_id == drop
+    assert drained.content == [_text_block("drop")]
     assert [e["pending_id"] for e in pending_inputs.snapshot_for("conv_a")] == [keep]
     # Idempotent — resolving an already-removed id does nothing.
-    pending_inputs.resolve("conv_a", drop)
+    assert pending_inputs.resolve("conv_a", drop) is None
     assert [e["pending_id"] for e in pending_inputs.snapshot_for("conv_a")] == [keep]
 
 
@@ -250,6 +253,7 @@ def test_entries_are_scoped_per_conversation() -> None:
     """
     a = pending_inputs.record("conv_a", [_text_block("for a")])
     pending_inputs.record("conv_b", [_text_block("for b")])
+    assert pending_inputs.resolve("conv_b", a) is None
 
     assert [e["pending_id"] for e in pending_inputs.snapshot_for("conv_a")] == [a]
     # conv_b's snapshot doesn't contain conv_a's entry.

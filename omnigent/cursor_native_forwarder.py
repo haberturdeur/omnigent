@@ -15,7 +15,7 @@ socket; its conversation lives in a **content-addressed SQLite store** at
 ``~/.cursor/chats/<md5(cwd)>/<chat-id>/store.db``. Each message is a plain-JSON
 ``blobs`` row (``role`` + ``content``); SQLite ``rowid`` order is conversation
 order (the binary Merkle manifest that also lives there is *not* needed). We poll
-that store, extract new user/assistant messages, and POST them as
+that store, extract new messages, tool calls and results, and POST them as
 ``external_conversation_item`` events — which also seeds the session title from
 the first user message (the same hook claude/codex rely on).
 
@@ -52,6 +52,7 @@ import httpx
 from omnigent import cursor_native_status
 from omnigent._native_post_delivery import post_may_have_been_delivered
 from omnigent.cursor_native_bridge import FORK_HISTORY_CLOSE_TAG, FORK_HISTORY_OPEN_TAG
+from omnigent.inner.cursor_protocol.prompt_identity import split_input_marker
 from omnigent.inner.native_attachments import ATTACHMENT_MARKER_STRIP_PATTERN
 
 _logger = logging.getLogger(__name__)
@@ -152,7 +153,9 @@ class _ForwardState:
     :param last_rowid: Highest ``blobs.rowid`` already processed for
         ``store_path`` (forwarded or deliberately skipped). The store is
         append-only and content-addressed, so rowids only grow — tracking the
-        high-water mark is sufficient dedup with O(1) state.
+        high-water mark plus the partial-row item offset deduplicates delivery.
+    :param last_item_index: Number of delivered items in the next row, allowing
+        retries and restarts between tools stored in the same message.
     :param launch_epoch_ms: This session's launch time, used to break ties when
         two sessions discover the same chat: the earlier-launched (established)
         session keeps it. ``0`` for a cold default.
@@ -165,6 +168,8 @@ class _ForwardState:
     last_rowid: int = 0
     launch_epoch_ms: int = 0
     heartbeat_ms: int = 0
+    # Items already delivered from the first row after last_rowid.
+    last_item_index: int = 0
 
 
 @dataclass
@@ -195,11 +200,13 @@ def _read_state(bridge_dir: Path) -> _ForwardState:
     last_rowid = data.get("last_rowid")
     launch_epoch_ms = data.get("launch_epoch_ms")
     heartbeat_ms = data.get("heartbeat_ms")
+    last_item_index = data.get("last_item_index")
     return _ForwardState(
         store_path=store_path if isinstance(store_path, str) else None,
         last_rowid=last_rowid if isinstance(last_rowid, int) else 0,
         launch_epoch_ms=launch_epoch_ms if isinstance(launch_epoch_ms, int) else 0,
         heartbeat_ms=heartbeat_ms if isinstance(heartbeat_ms, int) else 0,
+        last_item_index=last_item_index if isinstance(last_item_index, int) else 0,
     )
 
 
@@ -219,6 +226,7 @@ def _write_state(bridge_dir: Path, state: _ForwardState) -> bool:
                 {
                     "store_path": state.store_path,
                     "last_rowid": state.last_rowid,
+                    "last_item_index": state.last_item_index,
                     "launch_epoch_ms": state.launch_epoch_ms,
                     # Stamp the heartbeat at persist time so every poll refreshes
                     # the chat claim; a peer treats a claim older than
@@ -506,6 +514,8 @@ class _MirrorItem:
     item_type: str
     item_data: dict[str, object]
     response_id: str
+    last_in_row: bool = True
+    pending_id: str | None = None
 
 
 def _read_blob_rows(store_path: Path, last_rowid: int) -> list[tuple[int, str, object]]:
@@ -654,7 +664,9 @@ async def _post_model_change_if_new(
         )
 
 
-def _read_new_items(store_path: Path, last_rowid: int, agent_name: str) -> list[_MirrorItem]:
+def _read_new_items(
+    store_path: Path, last_rowid: int, agent_name: str, last_item_index: int = 0
+) -> list[_MirrorItem]:
     """Read role-bearing blobs with ``rowid > last_rowid`` as conversation items.
 
     Reads the latest WAL-committed state each call so new messages surface while
@@ -663,25 +675,114 @@ def _read_new_items(store_path: Path, last_rowid: int, agent_name: str) -> list[
     :param store_path: The cursor chat store to read.
     :param last_rowid: High-water rowid already processed.
     :param agent_name: Agent label stamped on assistant items.
+    :param last_item_index: Items to skip in the first unread row after partial delivery.
     :returns: New items in conversation (rowid) order; the caller advances its
         cursor to the max rowid returned even for skipped (system/context) rows.
     """
     items: list[_MirrorItem] = []
     rows = _read_blob_rows(store_path, last_rowid)
-    for rowid, blob_id, data in rows:
-        item = _blob_to_item(rowid, blob_id, data, agent_name)
-        if item is not None:
-            items.append(item)
-        else:
+    for row_index, (rowid, blob_id, data) in enumerate(rows):
+        row_items = _blob_to_items(rowid, blob_id, data, agent_name)
+        if not row_items:
             # A skipped row (system prompt, context dump, non-JSON Merkle node)
             # still advances the cursor so it is never reconsidered: emit a
             # sentinel carrying just the rowid.
-            items.append(_MirrorItem(rowid=rowid, item_type="", item_data={}, response_id=""))
+            row_items = [_MirrorItem(rowid=rowid, item_type="", item_data={}, response_id="")]
+        for item in row_items[:-1]:
+            item.last_in_row = False
+        items.extend(row_items[last_item_index:] if row_index == 0 else row_items)
+    return items
+
+
+def _blob_to_items(rowid: int, blob_id: str, data: object, agent_name: str) -> list[_MirrorItem]:
+    """Preserve text, tool calls and results in the order stored by Cursor."""
+    if not isinstance(data, (str, bytes, bytearray)):
+        return []
+    try:
+        obj = json.loads(data)
+    except (ValueError, UnicodeDecodeError):
+        return []
+    if not isinstance(obj, dict):
+        return []
+    content = obj.get("content")
+    role = obj.get("role")
+    if role not in ("assistant", "tool") or not isinstance(content, list):
+        item = _blob_to_item(rowid, blob_id, data, agent_name)
+        return [item] if item is not None else []
+
+    items: list[_MirrorItem] = []
+    text_parts: list[dict[str, object]] = []
+
+    def flush_text() -> None:
+        if text_parts and role == "assistant":
+            item = _blob_to_item(
+                rowid, blob_id, json.dumps({"role": role, "content": text_parts}), agent_name
+            )
+            if item is not None:
+                items.append(item)
+        text_parts.clear()
+
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        kind = part.get("type")
+        if kind == "text":
+            text_parts.append(part)
+            continue
+        call_id = part.get("toolCallId")
+        if not isinstance(call_id, str) or not call_id:
+            continue
+        # The UI pairs tools by (response_id, call_id), across separate store rows.
+        response_id = f"cursor:tool:{hashlib.sha256(call_id.encode()).hexdigest()}"[
+            :_RESPONSE_ID_MAX_LEN
+        ]
+        if kind == "tool-call" and role == "assistant":
+            name = part.get("toolName")
+            if not isinstance(name, str) or not name:
+                continue
+            args = part.get("args", {})
+            if isinstance(args, dict):
+                args = dict(args)
+                if name in {"Read", "Write", "StrReplace", "Edit", "MultiEdit"}:
+                    if "path" in args:
+                        args.setdefault("file_path", args["path"])
+            name = {"Shell": "shell", "StrReplace": "Edit"}.get(name, name)
+            flush_text()
+            items.append(
+                _MirrorItem(
+                    rowid=rowid,
+                    item_type="function_call",
+                    item_data={
+                        "agent": agent_name,
+                        "name": name,
+                        "arguments": json.dumps(args, ensure_ascii=False),
+                        "call_id": call_id,
+                    },
+                    response_id=response_id,
+                )
+            )
+        elif kind == "tool-result" and role == "tool":
+            result = part.get("result")
+            flush_text()
+            items.append(
+                _MirrorItem(
+                    rowid=rowid,
+                    item_type="function_call_output",
+                    item_data={
+                        "call_id": call_id,
+                        "output": result
+                        if isinstance(result, str)
+                        else json.dumps(result, ensure_ascii=False),
+                    },
+                    response_id=response_id,
+                )
+            )
+    flush_text()
     return items
 
 
 def _blob_to_item(rowid: int, blob_id: str, data: object, agent_name: str) -> _MirrorItem | None:
-    """Convert one ``blobs`` row to a mirror item, or ``None`` to skip it."""
+    """Extract a text message or compaction marker from one ``blobs`` row."""
     if isinstance(data, (bytes, bytearray)):
         try:
             data = data.decode("utf-8")
@@ -713,11 +814,13 @@ def _blob_to_item(rowid: int, blob_id: str, data: object, agent_name: str) -> _M
         prompt = _unwrap_user_query(_content_text(content))
         if not prompt:
             return None
+        prompt, pending_id = split_input_marker(prompt)
         return _MirrorItem(
             rowid=rowid,
             item_type="message",
             item_data={"role": "user", "content": [{"type": "input_text", "text": prompt}]},
             response_id=response_id,
+            pending_id=pending_id,
         )
     if role == "assistant":
         text = _content_text(obj.get("content")).strip()
@@ -799,6 +902,7 @@ async def _post_conversation_item(
                 "item_type": item.item_type,
                 "item_data": item.item_data,
                 "response_id": item.response_id,
+                **({"pending_id": item.pending_id} if item.pending_id is not None else {}),
             },
         },
     )
@@ -948,6 +1052,7 @@ async def forward_cursor_store_to_session(
         persisted = _ForwardState(store_path=str(fixed_store_path))
     store_path: Path | None = None
     last_rowid = 0
+    last_item_index = 0
     # Bounded-retry-then-skip guard (see the post loop below): the rowid whose
     # POST is currently being rejected and how many consecutive rejections it
     # has seen. Reset whenever the cursor advances past an item.
@@ -975,6 +1080,9 @@ async def forward_cursor_store_to_session(
                             last_rowid=persisted.last_rowid
                             if persisted.store_path == str(native_store)
                             else 0,
+                            last_item_index=persisted.last_item_index
+                            if persisted.store_path == str(native_store)
+                            else 0,
                         )
                         store_path = None
                         chat_id_patched = False
@@ -992,11 +1100,13 @@ async def forward_cursor_store_to_session(
                     if persisted.store_path and Path(persisted.store_path).exists():
                         store_path = Path(persisted.store_path)
                         last_rowid = persisted.last_rowid
+                        last_item_index = persisted.last_item_index
                         _write_state(
                             bridge_dir,
                             _ForwardState(
                                 store_path=str(store_path),
                                 last_rowid=last_rowid,
+                                last_item_index=last_item_index,
                                 launch_epoch_ms=launch_epoch_ms,
                             ),
                         )
@@ -1017,8 +1127,10 @@ async def forward_cursor_store_to_session(
                             store_path = resolved
                             if persisted.store_path == str(resolved):
                                 last_rowid = persisted.last_rowid
+                                last_item_index = persisted.last_item_index
                             else:
                                 last_rowid = 0
+                                last_item_index = 0
                                 # A fresh store (cold resume) is a new chat:
                                 # reset the model dedupe so the new chat's
                                 # current model is re-posted (server no-ops if
@@ -1029,6 +1141,7 @@ async def forward_cursor_store_to_session(
                                 _ForwardState(
                                     store_path=str(resolved),
                                     last_rowid=last_rowid,
+                                    last_item_index=last_item_index,
                                     launch_epoch_ms=launch_epoch_ms,
                                 ),
                             )
@@ -1061,7 +1174,7 @@ async def forward_cursor_store_to_session(
                         store_path = None
                     else:
                         items = await asyncio.to_thread(
-                            _read_new_items, store_path, last_rowid, agent_name
+                            _read_new_items, store_path, last_rowid, agent_name, last_item_index
                         )
                         for item in items:
                             if item.item_type == "compaction_completed":
@@ -1107,6 +1220,7 @@ async def forward_cursor_store_to_session(
                                     )
                                 failed_rowid = failed_attempts = 0
                                 last_rowid = item.rowid
+                                last_item_index = 0
                                 _write_state(
                                     bridge_dir,
                                     _ForwardState(
@@ -1184,12 +1298,17 @@ async def forward_cursor_store_to_session(
                             # skip, a quarantine, or a non-posted sentinel row:
                             # advance past this item and reset the failure counter.
                             failed_rowid = failed_attempts = 0
-                            last_rowid = item.rowid
+                            if item.last_in_row:
+                                last_rowid = item.rowid
+                                last_item_index = 0
+                            else:
+                                last_item_index += 1
                             _write_state(
                                 bridge_dir,
                                 _ForwardState(
                                     store_path=str(store_path),
                                     last_rowid=last_rowid,
+                                    last_item_index=last_item_index,
                                     launch_epoch_ms=launch_epoch_ms,
                                 ),
                             )
@@ -1201,6 +1320,7 @@ async def forward_cursor_store_to_session(
                             _ForwardState(
                                 store_path=str(store_path),
                                 last_rowid=last_rowid,
+                                last_item_index=last_item_index,
                                 launch_epoch_ms=launch_epoch_ms,
                             ),
                         )

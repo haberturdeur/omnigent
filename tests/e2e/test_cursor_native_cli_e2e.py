@@ -688,6 +688,81 @@ def test_cursor_native_cli_tool_approval_surfaced_as_elicitation(
         handle.terminate()
 
 
+def test_cursor_native_queue_steers_without_duplicate_submission(
+    resume_test_server: str,
+    tmp_path: Path,
+    request: pytest.FixtureRequest,
+) -> None:
+    """A busy native turn queues a web follow-up and promotes it exactly once."""
+    profile = request.config.getoption("--profile")
+    pwd_dir = tmp_path / "queue-workspace"
+    pwd_dir.mkdir()
+    marker = f"CURSOR_STEER_{uuid.uuid4().hex[:8].upper()}"
+    follow_up = f"Change direction now. Reply with only {marker}."
+    handle = spawn_cli_background(
+        [str(omnigent_console_script()), "cursor", "--server", resume_test_server, _FORCE_FLAG],
+        env=cli_env(profile=profile),
+        cwd=str(pwd_dir),
+    )
+    try:
+        session_id = wait_for_conversation_id(handle, timeout=_CONV_ID_TIMEOUT)
+        with httpx.Client(base_url=resume_test_server, timeout=30) as client:
+            wait_for_terminal_ready(
+                client,
+                conversation_id=session_id,
+                harness="cursor",
+                timeout=_TERMINAL_READY_TIMEOUT,
+            )
+            inject_user_message(
+                client,
+                conversation_id=session_id,
+                text=(
+                    "Run this shell command in the foreground: "
+                    "echo started > started.txt; sleep 60"
+                ),
+            )
+            _poll_for_file_marker(
+                pwd_dir / "started.txt", marker="started", timeout=_REPLY_TIMEOUT
+            )
+            inject_user_message(client, conversation_id=session_id, text=follow_up)
+            queue_url = f"/v1/sessions/{session_id}/cursor-queue"
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                response = client.get(queue_url)
+                response.raise_for_status()
+                snapshot = response.json()
+                if snapshot["messages"] and snapshot["can_steer"]:
+                    break
+                time.sleep(0.25)
+            else:
+                pytest.fail(
+                    "Cursor did not expose a steerable native follow-up during the tool run"
+                )
+            assert [message["text"] for message in snapshot["messages"]] == [follow_up]
+            action = {"action": "steer_queue", "revision": snapshot["revision"], "index": 0}
+            response = client.post(queue_url, json=action)
+            response.raise_for_status()
+            assert client.post(queue_url, json=action).status_code == 409
+            poll_for_assistant_marker(
+                client, conversation_id=session_id, marker=marker, timeout=_REPLY_TIMEOUT
+            )
+            response = client.get(queue_url)
+            response.raise_for_status()
+            assert response.json()["messages"] == []
+            response = client.get(
+                f"/v1/sessions/{session_id}/items", params={"limit": 100, "order": "asc"}
+            )
+            response.raise_for_status()
+            user_texts = [
+                "\n".join(block.get("text", "") for block in item.get("content", []))
+                for item in response.json()["data"]
+                if item.get("role") == "user"
+            ]
+            assert user_texts.count(follow_up) == 1
+    finally:
+        handle.terminate()
+
+
 def _items_text(client: httpx.Client, conversation_id: str) -> str:
     """Return the concatenated text of every item in a conversation (``""`` on error)."""
     resp = client.get(

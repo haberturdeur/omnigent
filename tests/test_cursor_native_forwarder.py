@@ -143,6 +143,173 @@ class TestContentText:
         assert fwd._content_text({"weird": 1}) == ""
 
 
+@pytest.mark.parametrize(
+    ("name", "args"),
+    [
+        ("Shell", {"command": "git status"}),
+        ("StrReplace", {"path": "/tmp/demo.py", "old_string": "before", "new_string": "after"}),
+    ],
+)
+def test_store_mirrors_tool_calls_and_results(tmp_path: Path, name: str, args: dict) -> None:
+    store = tmp_path / "store.db"
+    writer = _make_store(
+        store,
+        [
+            (
+                "call",
+                _assistant(
+                    [{"type": "tool-call", "toolCallId": "call-1", "toolName": name, "args": args}]
+                ),
+            ),
+            (
+                "result",
+                {
+                    "role": "tool",
+                    "content": [{"type": "tool-result", "toolCallId": "call-1", "result": "done"}],
+                },
+            ),
+        ],
+    )
+    writer.close()
+
+    items = [item for item in fwd._read_new_items(store, 0, "cursor") if item.item_type]
+    assert [item.item_type for item in items] == ["function_call", "function_call_output"]
+    assert items[0].item_data["call_id"] == items[1].item_data["call_id"]
+    assert items[0].response_id == items[1].response_id
+    assert len(items[0].response_id) <= fwd._RESPONSE_ID_MAX_LEN
+    assert items[0].item_data["name"] == ("shell" if name == "Shell" else "Edit")
+    assert (
+        json.loads(items[0].item_data["arguments"])["command" if name == "Shell" else "path"]
+        == args["command" if name == "Shell" else "path"]
+    )
+    assert items[1].item_data["output"] == "done"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("restart", [False, True])
+@pytest.mark.parametrize("protocol", [False, True])
+async def test_tool_mirror_retries_partial_row_without_duplicates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, restart: bool, protocol: bool
+) -> None:
+    from omnigent.entities.conversation import parse_item_data
+
+    store = tmp_path / "store.db"
+    writer = _make_store(
+        store,
+        [
+            (
+                "calls",
+                _assistant(
+                    [
+                        {"type": "text", "text": "Checking files"},
+                        {
+                            "type": "tool-call",
+                            "toolCallId": "shell-1",
+                            "toolName": "Shell",
+                            "args": {"command": "pwd"},
+                        },
+                        {
+                            "type": "tool-call",
+                            "toolCallId": "edit-1",
+                            "toolName": "StrReplace",
+                            "args": {"path": "demo.py", "old_string": "old", "new_string": "new"},
+                        },
+                    ]
+                ),
+            ),
+            (
+                "results",
+                {
+                    "role": "tool",
+                    "content": [
+                        {
+                            "type": "tool-result",
+                            "toolCallId": "shell-1",
+                            "result": {"stdout": "/tmp", "exitCode": 0},
+                        },
+                        {
+                            "type": "tool-result",
+                            "toolCallId": "edit-1",
+                            "result": {"error": "file is read-only"},
+                        },
+                    ],
+                },
+            ),
+        ],
+    )
+    writer.close()
+    bridge = tmp_path / "bridge"
+    if protocol:
+        (bridge / "protocol").mkdir(parents=True)
+        (bridge / "protocol" / "enabled").touch()
+        monkeypatch.setattr(fwd, "_native_store_path", lambda *_: store)
+    delivered = []
+    interrupted = False
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal interrupted
+        if request.url.path.endswith("/events"):
+            event = json.loads(request.content)
+            if event["type"] == "external_conversation_item":
+                item = event["data"]
+                parse_item_data(item["item_type"], item["item_data"])
+                if item["item_data"].get("call_id") == "edit-1" and not interrupted:
+                    interrupted = True
+                    if restart:
+                        raise asyncio.CancelledError
+                    return httpx.Response(503)
+                delivered.append(item)
+        return httpx.Response(200, json={})
+
+    client_class = httpx.AsyncClient
+    monkeypatch.setattr(
+        fwd.httpx,
+        "AsyncClient",
+        lambda **kwargs: client_class(**kwargs, transport=httpx.MockTransport(handle)),
+    )
+
+    async def run() -> None:
+        await fwd.forward_cursor_store_to_session(
+            base_url="http://test",
+            headers={},
+            session_id="conv_test",
+            bridge_dir=bridge,
+            agent_name="cursor",
+            workspace="",
+            launch_epoch_ms=0,
+            fixed_store_path=None if protocol else store,
+            poll_interval_s=0.001,
+        )
+
+    if restart:
+        with pytest.raises(asyncio.CancelledError):
+            await run()
+        state = fwd._read_state(bridge)
+        assert state.last_rowid == 0
+        assert state.last_item_index == 2
+
+    task = asyncio.create_task(run())
+    try:
+        async with asyncio.timeout(3):
+            while fwd._read_state(bridge).last_rowid < 2:
+                if task.done():
+                    await task
+                await asyncio.sleep(0.001)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert [item["item_type"] for item in delivered] == [
+        "message",
+        "function_call",
+        "function_call",
+        "function_call_output",
+        "function_call_output",
+    ]
+    assert json.loads(delivered[-1]["item_data"]["output"]) == {"error": "file is read-only"}
+    assert fwd._read_state(bridge).last_item_index == 0
+
+
 class TestBlobToItem:
     # _blob_to_item receives the raw blob payload (a JSON string, as stored).
     @staticmethod
@@ -584,13 +751,15 @@ class TestPostModelChangeIfNew:
 
 
 @pytest.mark.asyncio
-async def test_post_conversation_item_shape() -> None:
+@pytest.mark.parametrize("pending_id", [None, "pending_" + "a" * 32])
+async def test_post_conversation_item_shape(pending_id) -> None:
     client = _RecordingClient()
     item = fwd._MirrorItem(
         rowid=5,
         item_type="message",
         item_data={"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
         response_id="cursor:bid",
+        pending_id=pending_id,
     )
     await fwd._post_conversation_item(client, session_id="conv_1", item=item)  # type: ignore[arg-type]
     url, body = client.posts[0]
@@ -600,6 +769,7 @@ async def test_post_conversation_item_shape() -> None:
         "item_type": "message",
         "item_data": {"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
         "response_id": "cursor:bid",
+        **({"pending_id": pending_id} if pending_id else {}),
     }
 
 

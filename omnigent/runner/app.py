@@ -9760,6 +9760,44 @@ def create_runner_app(
             return JSONResponse(status_code=503, content={"error": str(exc)})
         return JSONResponse(content=config, headers={"Cache-Control": "no-store"})
 
+    @app.get("/v1/sessions/{session_id}/cursor-queue")
+    async def get_session_cursor_queue(session_id: str) -> JSONResponse:
+        if _session_harness_name(session_id) != "cursor-native":
+            return JSONResponse(status_code=404, content={"error": "not_cursor_native"})
+        from omnigent.cursor_native_bridge import bridge_dir_for_session_id
+        from omnigent.inner.cursor_protocol.transport import send_control
+
+        try:
+            queue = await asyncio.to_thread(
+                send_control,
+                bridge_dir_for_session_id(session_id),
+                {"action": "get_queue"},
+                timeout=2,
+            )
+        except RuntimeError as exc:
+            return JSONResponse(status_code=503, content={"error": str(exc)})
+        return JSONResponse(content=queue, headers={"Cache-Control": "no-store"})
+
+    @app.post("/v1/sessions/{session_id}/cursor-queue")
+    async def update_session_cursor_queue(session_id: str, body: dict[str, Any]) -> JSONResponse:
+        if _session_harness_name(session_id) != "cursor-native":
+            return JSONResponse(status_code=404, content={"error": "not_cursor_native"})
+        if body.get("action") != "steer_queue":
+            return JSONResponse(status_code=400, content={"error": "invalid_cursor_queue_action"})
+        from omnigent.cursor_native_bridge import bridge_dir_for_session_id
+        from omnigent.inner.cursor_protocol.transport import send_control
+
+        try:
+            result = await asyncio.to_thread(
+                send_control,
+                bridge_dir_for_session_id(session_id),
+                {key: body[key] for key in ("action", "index", "revision") if key in body},
+                timeout=5,
+            )
+        except RuntimeError as exc:
+            return JSONResponse(status_code=409, content={"error": str(exc)})
+        return JSONResponse(content=result)
+
     @app.get("/v1/sessions/{session_id}/cursor-model-options")
     async def get_session_cursor_model_options(session_id: str) -> JSONResponse:
         if _session_harness_name(session_id) != "cursor-native":

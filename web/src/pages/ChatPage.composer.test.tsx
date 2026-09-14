@@ -2894,6 +2894,16 @@ describe("shouldQueueSend", () => {
     expect(shouldQueueSend(null, "streaming", "running", [])).toBe(false);
   });
 
+  it("lets Cursor own its queue even while busy", () => {
+    expect(shouldQueueSend("conv_a", "streaming", "running", [], false, "cursor-native")).toBe(
+      false,
+    );
+    expect(shouldQueueSend("conv_a", "idle", "running", [q("conv_a")], true, "cursor-native")).toBe(
+      false,
+    );
+    expect(shouldQueueSend("conv_a", "idle", "running", [], false, "claude-native")).toBe(true);
+  });
+
   it("queues while the session is busy (streaming or running)", () => {
     expect(shouldQueueSend("conv_a", "streaming", "idle", [])).toBe(true);
     expect(shouldQueueSend("conv_a", "idle", "running", [])).toBe(true);

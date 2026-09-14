@@ -19,6 +19,18 @@ function createControls(emit) {
   let unsubscribe;
   let agentStore;
   let reportedRunEverything;
+  let queuedMessages;
+  let queueRevision = randomUUID();
+  let queueUpdating = false;
+  const queueSnapshot = () => {
+    if (!current || !queuedMessages || typeof current.onSendQueuedNow !== "function") {
+      throw new Error("Cursor native queue is not ready");
+    }
+    return { revision: queueRevision,
+      messages: queuedMessages.map((text, index) => ({ index,
+        text: text.replace(/\s*<!-- omnigent-input:pending_[0-9a-f]{32} -->\s*$/, "") })),
+      can_steer: !queueUpdating && current.queuedMessageEmptyInputAction === "steer" };
+  };
   const approvalConfig = () => {
     if (!agentStore) throw new Error("Cursor approval configuration is not ready");
     const mode = agentStore.getMetadata("approvalMode") ??
@@ -42,9 +54,12 @@ function createControls(emit) {
       failedToPublish = true;
     }
   };
-  const start = (fn) => {
+  const start = (fn, onError = () => {}) => {
     // Native submit promises cover the model run; acknowledge dispatch without waiting for it.
-    Promise.resolve(fn()).catch((error) => publish("command_error", { message: error.message }));
+    Promise.resolve(fn()).catch((error) => {
+      onError();
+      publish("command_error", { message: error.message });
+    });
     return { status: "submitted" };
   };
   const syncSlot = (kind, value, args) => {
@@ -60,6 +75,11 @@ function createControls(emit) {
   };
   const attach = (props) => {
     if (!props) return;
+    if (Array.isArray(props.value?.queuedMessages) && queuedMessages !== props.value.queuedMessages) {
+      queuedMessages = props.value.queuedMessages;
+      queueUpdating = false;
+      queueRevision = randomUUID();
+    }
     if (props.value?.agentStore && typeof props.value.isRunEverything === "boolean") {
       agentStore = props.value.agentStore;
       const enabled = runEverything();
@@ -84,7 +104,10 @@ function createControls(emit) {
         typeof props.onAbort !== "function") return;
     const changed = current?.getChatId() !== props.getChatId();
     current = props;
-    if (changed) publish("session_ready", {});
+    if (changed) {
+      queueRevision = randomUUID();
+      publish("session_ready", {});
+    }
     syncSlot("question", props.askQuestionPrompt?.args, props.askQuestionPrompt?.args);
     syncSlot("mode", props.switchModePrompt?.args, props.switchModePrompt?.args);
     syncSlot("web", props.sessionDecision?.id, props.sessionDecision?.operation);
@@ -104,6 +127,28 @@ function createControls(emit) {
   });
   const dispatch = async (request) => {
     if (request.action === "get_approval_config") return approvalConfig();
+    if (request.action === "get_queue") return queueSnapshot();
+    if (request.action === "steer_queue") {
+      const snapshot = queueSnapshot();
+      if (request.revision !== snapshot.revision || queueUpdating) {
+        throw new Error("Cursor queue changed; refresh before trying again");
+      }
+      if (request.index !== 0 || !queuedMessages.length || !snapshot.can_steer) {
+        throw new Error("Only Cursor's first queued follow-up can be steered right now");
+      }
+      // Wait for a native queue update before allowing another promotion.
+      queueUpdating = true;
+      queueRevision = randomUUID();
+      try {
+        return start(() => current.onSendQueuedNow(), () => {
+          queueUpdating = false;
+          queueRevision = randomUUID();
+        });
+      } catch (error) {
+        queueUpdating = false;
+        throw error;
+      }
+    }
     if (request.action === "reply") {
       if (request.require_run_everything === true && runEverything() !== true) {
         throw new Error("Cursor Run Everything is no longer enabled");
