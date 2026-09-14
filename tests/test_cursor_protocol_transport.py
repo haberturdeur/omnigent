@@ -1,10 +1,20 @@
 """Native controls wait for startup without replaying uncertain deliveries."""
 
 import json
+import subprocess
+import sys
+import time
 
 import pytest
 
 from omnigent.inner.cursor_protocol import transport
+
+
+def _reaped_pid() -> int:
+    """A pid that has certainly exited and been reaped."""
+    process = subprocess.Popen([sys.executable, "-c", ""])
+    process.wait()
+    return process.pid
 
 
 @pytest.mark.parametrize("initial", [None, {"epoch": "launch", "controlsReady": False}])
@@ -53,6 +63,24 @@ def test_stale_decision_is_not_sent_to_restarted_terminal(tmp_path):
     (directory / "active.json").write_text(json.dumps({"epoch": "new", "controlsReady": False}))
     with pytest.raises(RuntimeError, match="stale"):
         transport.send_control(tmp_path, {"action": "reply", "expected_epoch": "old"})
+    assert not list(directory.glob("request.*.json"))
+
+
+def test_controls_report_a_dead_terminal_instead_of_waiting_on_its_leftovers(tmp_path):
+    """A signalled bridge never clears ``controlsReady``; callers must not hang.
+
+    Killing the host leaves that state behind, so every queued message would
+    post a request nothing answers and wait out the full timeout.
+    """
+    directory = tmp_path / "protocol"
+    directory.mkdir()
+    (directory / "active.json").write_text(
+        json.dumps({"epoch": "launch", "pid": _reaped_pid(), "controlsReady": True})
+    )
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="no longer running"):
+        transport.send_control(tmp_path, {"action": "prompt", "content": "hello"}, timeout=10)
+    assert time.monotonic() - started < 2
     assert not list(directory.glob("request.*.json"))
 
 

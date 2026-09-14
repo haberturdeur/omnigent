@@ -185,6 +185,23 @@ def disable(bridge_dir: Path) -> None:
     (bridge_dir / "protocol" / "enabled").unlink(missing_ok=True)
 
 
+def _terminal_alive(pid: object) -> bool:
+    """Whether the terminal that published a state file is still running.
+
+    State written before the pid was recorded counts as live, since an absent
+    pid says nothing either way.
+    """
+    if not isinstance(pid, int):
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
 def send_control(bridge_dir: Path, payload: Json, *, timeout: float = 10) -> Json:
     """Dispatch once; an uncertain acknowledgement must never cause a keypress retry."""
     directory = bridge_dir / "protocol"
@@ -200,6 +217,14 @@ def send_control(bridge_dir: Path, payload: Json, *, timeout: float = 10) -> Jso
             if state is not None:
                 if payload.get("expected_epoch") not in (None, state.get("epoch")):
                     raise RuntimeError("Cursor terminal was restarted; this decision is stale")
+                # A bridge killed by a signal never runs its exit hook, so
+                # ``controlsReady`` outlives it. Say the terminal is gone rather
+                # than post a request nothing will ever answer.
+                if not _terminal_alive(state.get("pid")):
+                    raise RuntimeError(
+                        "cursor terminal is no longer running (the TUI exited); "
+                        "restart the session"
+                    )
                 if state.get("controlsReady"):
                     break
             time.sleep(0.05)
