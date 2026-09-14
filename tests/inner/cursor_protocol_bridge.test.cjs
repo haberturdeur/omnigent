@@ -87,7 +87,22 @@ test("missing KV blobs never publish a partial authoritative todo list", async (
 });
 
 test("unsupported installed bundle fails closed", async () => {
-  await assert.rejects(loadRuntime(__filename), /requires CLI/);
+  await assert.rejects(loadRuntime(__filename), /Unsupported Cursor bundle entry/);
+});
+
+test("a bundle whose exports were renamed fails closed", () => {
+  const { nativeExports } = require("../../omnigent/inner/cursor_protocol/bridge.cjs");
+  const runtime = (name) => (name === "../agent-client/dist/index.js" ? { PW: class {} } : {});
+  runtime.m = {};
+  assert.throws(() => nativeExports(runtime), /missing the native protocol interfaces/);
+});
+
+test("a bundle whose modules moved reports the missing module", () => {
+  const { nativeExports } = require("../../omnigent/inner/cursor_protocol/bridge.cjs");
+  // Webpack throws for an unknown id rather than returning an empty module.
+  const runtime = (name) => { throw new Error(`Cannot find module '${name}'`); };
+  runtime.m = {};
+  assert.throws(() => nativeExports(runtime), /Cannot find module/);
 });
 
 test("terminal bootstrap preserves stdio and native arguments without ACP", async () => {

@@ -17,7 +17,7 @@ from omnigent.cursor_native_permissions import (
     _post_external_elicitation_resolved,
     cursor_tool_call_elicitation_id,
 )
-from omnigent.inner.cursor_protocol.transport import send_control
+from omnigent.inner.cursor_protocol.transport import enabled, send_control
 
 Json: TypeAlias = dict[str, Any]  # type: ignore[explicit-any]
 logger = logging.getLogger(__name__)
@@ -276,6 +276,11 @@ async def forward_protocol_events(
     auth: httpx.Auth,
 ) -> None:
     """Retry delivery without advancing the durable journal position on failure."""
+    if not enabled(bridge_dir):
+        # The terminal fell back to the plain TUI, so no journal will ever
+        # appear; polling for one would retry for the life of the session.
+        logger.info("Cursor native protocol is off for this session; not forwarding its events")
+        return
     directory = bridge_dir / "protocol"
     position = directory / "forwarder.json"
     epoch, offset = "", 0

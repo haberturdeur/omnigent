@@ -6,8 +6,8 @@ const Module = require("node:module");
 const { randomUUID } = require("node:crypto");
 const { createControls, observeReact } = require("./controls.cjs");
 
-const SUPPORTED_VERSION = "2026.09.02-c22c1a3";
 const ENTRY = 'var __webpack_exports__=__webpack_require__("./src/main.tsx")';
+const CHUNK = 7569;
 
 function instrumentClient(client, emit, active, decodeCheckpoint) {
   const originalRun = client.run;
@@ -92,9 +92,6 @@ function instrumentClient(client, emit, active, decodeCheckpoint) {
 
 async function loadRuntime(entryPath) {
   const entry = fs.realpathSync(entryPath);
-  if (path.basename(path.dirname(entry)) !== SUPPORTED_VERSION) {
-    throw new Error(`Cursor protocol bridge requires CLI ${SUPPORTED_VERSION}`);
-  }
   const source = fs.readFileSync(entry, "utf8");
   if (source.split(ENTRY).length !== 2) throw new Error("Unsupported Cursor bundle entry");
   const vendor = new Module(entry, module);
@@ -102,17 +99,38 @@ async function loadRuntime(entryPath) {
   vendor.paths = Module._nodeModulePaths(path.dirname(entry));
   vendor._compile(source.replace(ENTRY, "module.exports=__webpack_require__"), entry);
   const runtime = vendor.exports;
-  await runtime.e(7569);
+  // Chunk ids are stable across builds in practice, but a renumbered bundle
+  // must say so plainly rather than surface a webpack internal.
+  try {
+    await runtime.e(CHUNK);
+  } catch (error) {
+    throw new Error(`Cursor bundle chunk ${CHUNK} is missing: ${error.message}`);
+  }
   return runtime;
+}
+
+// The bridge patches minified internals, so every interface it drives is
+// resolved up front. Callers probe a build with this before launching the TUI.
+function nativeExports(runtime) {
+  const client = runtime("../agent-client/dist/index.js").PW;
+  const store = runtime("../agent-kv/dist/index.js").pH;
+  const proto = runtime("../proto/dist/generated/agent/v1/agent_pb.js");
+  const todo = runtime("../proto/dist/generated/agent/v1/todo_tool_pb.js").kW;
+  const react = Object.keys(runtime.m).find((key) => key.endsWith("/react/jsx-runtime.js"));
+  if (typeof client?.prototype?.run !== "function" ||
+      typeof store?.prototype?.deserializeConversationStateStructure !== "function" ||
+      typeof proto?.ConversationStateStructure !== "function" ||
+      typeof todo !== "function" || !react) {
+    throw new Error("Cursor bundle is missing the native protocol interfaces");
+  }
+  return { client, store, proto, todo, react };
 }
 
 async function main() {
   const entry = process.argv[2];
   const runtime = await loadRuntime(entry);
-  const proto = runtime("../proto/dist/generated/agent/v1/agent_pb.js");
+  const { store: Store, todo: Todo, proto } = nativeExports(runtime);
   if (process.argv.includes("--probe")) {
-    const { pH: Store } = runtime("../agent-kv/dist/index.js");
-    const { kW: Todo } = runtime("../proto/dist/generated/agent/v1/todo_tool_pb.js");
     const todo = new Todo({ id: "probe", content: "Protocol probe", status: 1 });
     const store = new Store({ getBlob: async () => todo.toBinary(), setBlob: async () => {} },
       { set() {} });
@@ -125,7 +143,8 @@ async function main() {
     if (events.findLast((e) => e.kind === "conversation_checkpoint_update")?.message.todos[0]?.id !== "probe") {
       throw new Error("Native checkpoint decoding probe failed");
     }
-    process.stdout.write(JSON.stringify({ version: SUPPORTED_VERSION, nativeProtocol: "agent.v1", ready: true }) + "\n");
+    const version = path.basename(path.dirname(fs.realpathSync(entry)));
+    process.stdout.write(JSON.stringify({ version, nativeProtocol: "agent.v1", ready: true }) + "\n");
     return;
   }
   const directory = process.argv[3];
@@ -233,7 +252,7 @@ function createSideChannel(directory, active, proto) {
   } };
 }
 
-module.exports = { instrumentClient, loadRuntime, startTerminal, createSideChannel };
+module.exports = { instrumentClient, loadRuntime, nativeExports, startTerminal, createSideChannel };
 if (require.main === module) main().catch((error) => {
   process.stderr.write(`Cursor native bridge: ${error.message}\n`);
   process.exitCode = 1;

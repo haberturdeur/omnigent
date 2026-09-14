@@ -1256,6 +1256,7 @@ async def _run_auto_create_cursor_terminal(
     agent_spec: AgentSpec | None,
     terminal_launch_args: list[str] | None,
     executable: str | None = None,
+    stale_protocol_marker: bool = False,
 ) -> dict[str, Any]:
     """Drive ``_auto_create_cursor_terminal`` and return what it wired up.
 
@@ -1266,9 +1267,13 @@ async def _run_auto_create_cursor_terminal(
     ``httpx.MockTransport``, and a fake registry records the ``spec`` passed to
     ``launch_required_terminal`` so the test can assert on ``spec.args``.
 
-    :returns: ``{"spec": <launch spec>, "elicitation_kwargs": <kwargs>}``, the
-        latter captured from the elicitation supervisor the forwarder task
-        gathers (empty if that task never got to start it).
+    :param stale_protocol_marker: Seed the ``enabled`` marker an earlier
+        protocol-capable launch would have left behind, so a fallback can be
+        checked for clearing it.
+    :returns: ``{"spec": <launch spec>, "bridge_dir": <path>,
+        "elicitation_kwargs": <kwargs>}``, the last captured from the
+        elicitation supervisor the forwarder task gathers (empty if that task
+        never got to start it).
     """
     from omnigent.runner import _entry as _runner_entry
 
@@ -1302,7 +1307,12 @@ async def _run_auto_create_cursor_terminal(
     # the factory from reaching for ambient Databricks credentials in tests.
     monkeypatch.setattr(_runner_entry, "_make_auth_token_factory", lambda *a, **k: None)
 
-    captured: dict[str, Any] = {"elicitation_kwargs": {}}
+    session_id = "c42dbcb16fd3a87ee8f5d1fe4cabfdf8"
+    bridge_dir = cursor_native_bridge.bridge_dir_for_session_id(session_id)
+    if stale_protocol_marker:
+        (bridge_dir / "protocol").mkdir(parents=True, exist_ok=True)
+        (bridge_dir / "protocol" / "enabled").touch()
+    captured: dict[str, Any] = {"elicitation_kwargs": {}, "bridge_dir": bridge_dir}
     started = asyncio.Event()
 
     async def _capture_protocol(**kwargs: Any) -> None:
@@ -1355,7 +1365,7 @@ async def _run_auto_create_cursor_terminal(
     )
     try:
         await _auto_create_cursor_terminal(
-            "c42dbcb16fd3a87ee8f5d1fe4cabfdf8",
+            session_id,
             _FakeResourceRegistry(),  # type: ignore[arg-type]
             lambda _sid, _evt: None,
             server_client=fake_client,
@@ -3644,12 +3654,24 @@ async def test_auto_create_cursor_enables_native_protocol_without_flags(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_auto_create_cursor_rejects_unsupported_build_without_flags(tmp_path, monkeypatch):
-    with pytest.raises(RuntimeError, match="requires CLI"):
-        await _run_auto_create_cursor_terminal(
-            tmp_path=tmp_path,
-            monkeypatch=monkeypatch,
-            agent_spec=None,
-            terminal_launch_args=None,
-            executable="/unsupported/cursor-agent",
-        )
+async def test_auto_create_cursor_starts_plain_tui_on_unsupported_build(tmp_path, monkeypatch):
+    """An undrivable build costs native controls, not the session.
+
+    The marker an earlier protocol-capable launch left behind must not outlive
+    the fallback: consumers read it to decide between the native control channel
+    and tmux keystrokes, so a stale one would send controls into a void.
+    """
+    from omnigent.inner.cursor_protocol.transport import enabled
+
+    captured = await _run_auto_create_cursor_terminal(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        agent_spec=None,
+        terminal_launch_args=None,
+        executable="/unsupported/cursor-agent",
+        stale_protocol_marker=True,
+    )
+    assert captured["spec"].command == "/unsupported/cursor-agent"
+    assert not any(arg.endswith("bridge.cjs") for arg in captured["spec"].args)
+    assert "--approve-mcps" in captured["spec"].args
+    assert enabled(captured["bridge_dir"]) is False

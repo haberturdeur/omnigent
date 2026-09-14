@@ -5,16 +5,38 @@ TUI runs in Omnigent's tmux terminal. Its native runtime sends `agent.v1`
 protobuf messages over its existing backend connection. ACP is not launched.
 
 Every Cursor session uses the native bridge, including sessions created from
-the web UI. Standalone Cursor CLI **2026.09.02-c22c1a3** is required:
+the web UI. A standalone Cursor CLI installation is required:
 
 ```sh
 omnigent cursor
 ```
 
+The bridge patches the CLI's private internals, so it only runs against builds
+it can drive. Build **2026.09.08-6caf4ff** is validated by hand and starts
+immediately. Because the CLI updates itself, any other build is probed once
+before the terminal launches — the probe loads the bundle, resolves every
+interface the bridge patches, and decodes a checkpoint. Both outcomes are cached
+in `cursor_protocol_probe.json` under the Omnigent state directory, keyed by the
+bundle (version and stat) *and* the bridge scripts driving it, so a build already
+judged is not re-probed while a rebuilt bundle or an upgraded Omnigent is. A
+probe that could not be started at all is not recorded, since that says nothing
+about the build.
+
+A build that fails the probe does not cost the session: the plain TUI launches
+with the protocol off, and the `protocol/enabled` marker is cleared so prompt
+injection and model switching fall back to tmux. Native decision cards and
+`/model` control need the protocol, so check the runner log for
+`Cursor native protocol unavailable` if those stop working after a CLI update.
+
+The bridge also pins the bundle's chunk id, which has held across builds so far.
+A renumbered bundle fails the probe like any other incompatibility, so treat the
+probe as a safety net for CLI updates rather than a guarantee that every future
+build works.
+
 The old `--omnigent-native-protocol` passthrough flag is accepted for existing
-launch configurations but is no longer necessary. Unsupported or incomplete
-CLI installations fail at startup. Already-running terminals keep their launch
-mode; recreate the terminal to activate the bridge after upgrading Omnigent.
+launch configurations but is no longer necessary. Incomplete CLI installations
+fail at startup. Already-running terminals keep their launch mode; recreate the
+terminal to activate the bridge after upgrading Omnigent.
 
 For a source checkout, install the supervisor with
 `cargo install --path dev/omnidev --force`, then start `omnidev`. In a second

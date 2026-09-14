@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 import os
+import subprocess
 import time
 import uuid
 from pathlib import Path
@@ -11,17 +14,155 @@ from typing import Any, TypeAlias
 
 Json: TypeAlias = dict[str, Any]  # type: ignore[explicit-any]
 
+_logger = logging.getLogger(__name__)
+
 LAUNCH_FLAG = "--omnigent-native-protocol"
-SUPPORTED_VERSION = "2026.09.02-c22c1a3"
+# Build validated by hand against the current bridge, so it skips the probe;
+# re-check it when bridge.cjs changes. The CLI updates itself, so any other
+# build is probed once and cached rather than refused outright.
+SUPPORTED_VERSION = "2026.09.08-6caf4ff"
+PROBE_TIMEOUT_S = 120
+PROBE_CACHE_NAME = "cursor_protocol_probe.json"
+PROBE_CACHE_LIMIT = 8
+
+
+def _probe_cache_path() -> Path:
+    from omnigent.install_ledger import state_dir
+
+    return state_dir() / PROBE_CACHE_NAME
+
+
+def _bridge_fingerprint() -> str:
+    """Hash the bridge's own patch surface.
+
+    A verdict says the bridge could drive the bundle, so an Omnigent upgrade
+    that patches different internals invalidates it just as a rebuilt bundle
+    does. Content, not stat: the same bridge in a fresh checkout must match.
+    """
+    digest = hashlib.sha256()
+    try:
+        for name in ("bridge.cjs", "controls.cjs"):
+            digest.update(Path(__file__).with_name(name).read_bytes())
+    except OSError as exc:
+        raise RuntimeError(f"Cursor native protocol bridge is unreadable: {exc}") from exc
+    return digest.hexdigest()[:16]
+
+
+def _fingerprint(install: Path) -> str:
+    """Identify the build and the bridge, so a change to either is re-probed."""
+    stat = (install / "index.js").stat()
+    return f"{install.name}:{stat.st_size}:{stat.st_mtime_ns}:{_bridge_fingerprint()}"
+
+
+def _cached_verdicts() -> list[Json]:
+    """Read the recorded verdicts, most recent first; a bad cache just re-probes."""
+    try:
+        cached = json.loads(_probe_cache_path().read_text())
+    except (OSError, ValueError):
+        return []
+    builds = cached.get("builds") if isinstance(cached, dict) else None
+    if not isinstance(builds, list):
+        return []
+    return [b for b in builds if isinstance(b, dict) and isinstance(b.get("id"), str)]
+
+
+def _cached_verdict(fingerprint: str) -> Json | None:
+    return next((b for b in _cached_verdicts() if b["id"] == fingerprint), None)
+
+
+def _record_verdict(fingerprint: str, reason: str | None) -> None:
+    """Remember both outcomes so an undrivable build is probed once, not per launch."""
+    verdict: Json = {"id": fingerprint, "ok": reason is None}
+    if reason is not None:
+        verdict["reason"] = reason
+    builds = [verdict, *(b for b in _cached_verdicts() if b["id"] != fingerprint)]
+    path = _probe_cache_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        temporary.write_text(json.dumps({"builds": builds[:PROBE_CACHE_LIMIT]}))
+        temporary.replace(path)
+    except OSError:
+        _logger.debug("Could not persist the Cursor protocol probe result", exc_info=True)
+
+
+def _probe(install: Path) -> str | None:
+    """Load the bundle and touch every interface the bridge patches.
+
+    :param install: The resolved standalone CLI directory.
+    :returns: ``None`` when the bridge can drive the build, else the reason it
+        cannot. A bundle that never finishes loading is a property of the build,
+        so the timeout is a verdict rather than an error.
+    :raises RuntimeError: If the probe could not be started at all, which leaves
+        the build's compatibility unknown instead of decided.
+    """
+    try:
+        result = subprocess.run(
+            [
+                str(install / "node"),
+                str(Path(__file__).with_name("bridge.cjs")),
+                str(install / "index.js"),
+                "--probe",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=PROBE_TIMEOUT_S,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return f"the bundle did not finish loading within {PROBE_TIMEOUT_S}s"
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"Cursor native protocol probe failed to run: {exc}") from exc
+    if result.returncode != 0 or '"ready":true' not in result.stdout.replace(" ", ""):
+        return _probe_reason(result.stderr or result.stdout)
+    return None
+
+
+def _probe_reason(output: str) -> str:
+    """Pick the bridge's own diagnostic out of a require stack or traceback."""
+    lines = [line.strip() for line in output.strip().splitlines() if line.strip()]
+    prefix = "Cursor native bridge:"
+    reported = next((line for line in lines if line.startswith(prefix)), None)
+    if reported is not None:
+        return reported[len(prefix) :].strip()
+    return lines[0] if lines else "probe reported no result"
+
+
+def _incompatible(install: Path, reason: str) -> str:
+    return f"Cursor native protocol is not compatible with CLI {install.name}: {reason}"
+
+
+def verify_install(install: Path) -> None:
+    """Raise unless the bridge is known to drive this CLI build.
+
+    Probing loads the whole Cursor bundle, so callers must not run this on an
+    event loop; it is cheap only on the second and later launches of a build.
+
+    :param install: The resolved standalone CLI directory.
+    :raises RuntimeError: If the installation is incomplete or the build's
+        native interfaces do not match what the bridge patches.
+    """
+    if not (install / "node").is_file() or not (install / "index.js").is_file():
+        raise RuntimeError("Cursor native protocol requires the standalone CLI installation")
+    if install.name == SUPPORTED_VERSION:
+        return
+    fingerprint = _fingerprint(install)
+    cached = _cached_verdict(fingerprint)
+    if cached is not None:
+        if cached.get("ok") is True:
+            return
+        raise RuntimeError(_incompatible(install, str(cached.get("reason") or "unknown")))
+    reason = _probe(install)
+    _record_verdict(fingerprint, reason)
+    if reason is not None:
+        raise RuntimeError(_incompatible(install, reason))
+    _logger.info("Cursor native protocol validated CLI %s", install.name)
 
 
 def prepare_launch(executable: str, args: list[str], bridge_dir: Path) -> tuple[str, list[str]]:
     """Wrap the installed runtime while preserving Cursor's interactive argv."""
     install = Path(executable).resolve().parent
-    if install.name != SUPPORTED_VERSION:
-        raise RuntimeError(f"Cursor native protocol requires CLI {SUPPORTED_VERSION}")
-    if not (install / "node").is_file() or not (install / "index.js").is_file():
-        raise RuntimeError("Cursor native protocol requires the standalone CLI installation")
+    verify_install(install)
     directory = bridge_dir / "protocol"
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     directory.chmod(0o700)
@@ -37,6 +178,11 @@ def prepare_launch(executable: str, args: list[str], bridge_dir: Path) -> tuple[
 
 def enabled(bridge_dir: Path) -> bool:
     return (bridge_dir / "protocol" / "enabled").exists()
+
+
+def disable(bridge_dir: Path) -> None:
+    """Clear a marker left by an earlier launch so consumers use the tmux path."""
+    (bridge_dir / "protocol" / "enabled").unlink(missing_ok=True)
 
 
 def send_control(bridge_dir: Path, payload: Json, *, timeout: float = 10) -> Json:

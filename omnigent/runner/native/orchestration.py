@@ -2483,7 +2483,7 @@ async def _auto_create_cursor_terminal(
     write_hooks_config(Path(workspace), bridge_dir)
     cursor_command = resolve_cursor_executable()
     cursor_args = list(launch_config.terminal_launch_args or [])
-    from omnigent.inner.cursor_protocol.transport import LAUNCH_FLAG, prepare_launch
+    from omnigent.inner.cursor_protocol.transport import LAUNCH_FLAG, disable, prepare_launch
 
     cursor_args = [arg for arg in cursor_args if arg != LAUNCH_FLAG]
     if "--approve-mcps" not in cursor_args:
@@ -2503,7 +2503,23 @@ async def _auto_create_cursor_terminal(
         model = launch_config.model_override or _cursor_native_model_from_spec(agent_spec)
         if model is not None:
             cursor_args.extend(["--model", model])
-    cursor_command, cursor_args = prepare_launch(cursor_command, cursor_args, bridge_dir)
+    # A CLI build the bridge cannot drive must not cost the whole session: launch
+    # the plain TUI instead, which injects prompts and switches models over tmux.
+    # The first launch of an unrecognised build probes it by loading the entire
+    # Cursor bundle, so keep that off the event loop.
+    try:
+        cursor_command, cursor_args = await asyncio.to_thread(
+            prepare_launch, cursor_command, cursor_args, bridge_dir
+        )
+    except RuntimeError:
+        _logger.warning(
+            "Cursor native protocol unavailable for session=%s; "
+            "starting the terminal without native controls",
+            session_id,
+            exc_info=True,
+            extra={"session_id": session_id},
+        )
+        disable(bridge_dir)
     terminal_view = await resource_registry.launch_required_terminal(
         session_id=session_id,
         terminal_name="cursor",

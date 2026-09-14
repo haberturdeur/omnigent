@@ -22,6 +22,9 @@ async def test_snapshot_at_eof_is_republished_after_server_loses_cache(
     epoch = "42080bb7-a540-4242-bb5b-03b4c8ddb131"
     directory = tmp_path / "protocol"
     directory.mkdir()
+    # The marker the protocol-capable launch leaves; without it the forwarder
+    # treats the session as a plain-TUI fallback and returns.
+    (directory / "enabled").touch()
     event = {
         "root": True,
         "conversationId": "same-chat",
@@ -224,6 +227,7 @@ async def test_error_delivery_retries_without_replacing_todo_snapshot(tmp_path, 
     epoch = "42080bb7-a540-4242-bb5b-03b4c8ddb131"
     directory = tmp_path / "protocol"
     directory.mkdir()
+    (directory / "enabled").touch()
     checkpoint = {
         "root": True,
         "kind": "conversation_checkpoint_update",
