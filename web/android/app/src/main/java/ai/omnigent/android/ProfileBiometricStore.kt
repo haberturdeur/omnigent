@@ -28,11 +28,22 @@ interface ProfileCredentialStore {
         callback: (Result<ProfileCredential>) -> Unit,
     )
 
-    fun confirmRegistration(serverOrigin: String, profileId: String, registrationId: String)
+    fun confirmRegistration(
+        serverOrigin: String,
+        profileId: String,
+        registrationId: String,
+    )
 
-    fun rollbackRegistration(serverOrigin: String, profileId: String, registrationId: String)
+    fun rollbackRegistration(
+        serverOrigin: String,
+        profileId: String,
+        registrationId: String,
+    )
 
-    fun remove(serverOrigin: String, profileId: String)
+    fun remove(
+        serverOrigin: String,
+        profileId: String,
+    )
 }
 
 /** Stores profile passcodes behind an Android Keystore biometric key. */
@@ -50,14 +61,20 @@ class ProfileBiometricStore(
     ) {
         val storageKey = digest("$serverOrigin\u0000$profileId")
         try {
-            if (passcode != null) register(storageKey, passcode, callback)
-            else unlock(storageKey, callback)
+            if (passcode != null) {
+                register(storageKey, passcode, callback)
+            } else {
+                unlock(storageKey, callback)
+            }
         } catch (error: Throwable) {
             callback(Result.failure(error))
         }
     }
 
-    override fun remove(serverOrigin: String, profileId: String) {
+    override fun remove(
+        serverOrigin: String,
+        profileId: String,
+    ) {
         clearCredential(digest("$serverOrigin\u0000$profileId"))
     }
 
@@ -121,8 +138,7 @@ class ProfileBiometricStore(
                     ).putString(
                         "$storageKey.pending.value",
                         android.util.Base64.encodeToString(encrypted, 0),
-                    )
-                    .apply()
+                    ).apply()
                 callback(Result.success(ProfileCredential(passcode, registrationId)))
             } catch (error: Throwable) {
                 callback(Result.failure(error))
@@ -160,8 +176,9 @@ class ProfileBiometricStore(
             )
             return
         }
-        prompt(cipher, "Unlock private profile", onError = { callback(Result.failure(it)) }) {
-            authenticated ->
+        prompt(cipher, "Unlock private profile", onError = {
+            callback(Result.failure(it))
+        }) { authenticated ->
             try {
                 val plaintext = authenticated.doFinal(android.util.Base64.decode(value, 0))
                 callback(Result.success(ProfileCredential(plaintext.toString(Charsets.UTF_8))))
@@ -202,8 +219,9 @@ class ProfileBiometricStore(
             BiometricPrompt.PromptInfo
                 .Builder()
                 .setTitle(title)
-                .setSubtitle("Omnigent uses your device biometrics; the passcode stays encrypted on this device.")
-                .setNegativeButtonText("Use passcode")
+                .setSubtitle(
+                    "Omnigent uses your device biometrics; the passcode stays encrypted on this device.",
+                ).setNegativeButtonText("Use passcode")
                 .build()
         prompt.authenticate(info, BiometricPrompt.CryptoObject(cipher))
     }

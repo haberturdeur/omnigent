@@ -103,7 +103,9 @@ class SessionMonitorService : Service() {
                 connection.setRequestProperty("Cookie", it)
             }
             val status = connection.responseCode
-            if (status == HttpURLConnection.HTTP_UNAUTHORIZED || status == HttpURLConnection.HTTP_FORBIDDEN) {
+            if (status == HttpURLConnection.HTTP_UNAUTHORIZED ||
+                status == HttpURLConnection.HTTP_FORBIDDEN
+            ) {
                 throw SecurityException("Authentication required")
             }
             if (status !in 200..299) throw IllegalStateException("Server returned HTTP $status")
@@ -207,7 +209,10 @@ class SessionMonitorService : Service() {
         }
 
         fun startPreservingPreference(context: android.content.Context) {
-            ContextCompat.startForegroundService(context, Intent(context, SessionMonitorService::class.java))
+            ContextCompat.startForegroundService(
+                context,
+                Intent(context, SessionMonitorService::class.java),
+            )
         }
 
         fun stop(context: android.content.Context) {

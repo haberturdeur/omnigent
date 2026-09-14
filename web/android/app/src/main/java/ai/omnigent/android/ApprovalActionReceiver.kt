@@ -12,7 +12,10 @@ import java.util.concurrent.Executors
 
 /** Resolves an elicitation when the user taps a notification action. */
 class ApprovalActionReceiver : BroadcastReceiver() {
-    override fun onReceive(context: Context, intent: Intent) {
+    override fun onReceive(
+        context: Context,
+        intent: Intent,
+    ) {
         val instance = intent.getStringExtra(EXTRA_INSTANCE) ?: return
         val sessionId = intent.getStringExtra(EXTRA_SESSION_ID) ?: return
         val elicitationId = intent.getStringExtra(EXTRA_ELICITATION_ID) ?: return
@@ -78,17 +81,29 @@ class ApprovalActionReceiver : BroadcastReceiver() {
         fun requestBody(action: String): String? {
             val result = JSONObject()
             when (action) {
-                ACTION_APPROVE -> result.put("action", "accept")
-                ACTION_ALLOW_ALL_EDITS ->
+                ACTION_APPROVE -> {
+                    result.put("action", "accept")
+                }
+
+                ACTION_ALLOW_ALL_EDITS -> {
                     result
                         .put("action", "accept")
                         .put("content", JSONObject().put("allow_all_edits", true))
-                ACTION_REMEMBER ->
+                }
+
+                ACTION_REMEMBER -> {
                     result
                         .put("action", "accept")
                         .put("content", JSONObject().put("remember", true))
-                ACTION_REJECT -> result.put("action", "decline")
-                else -> return null
+                }
+
+                ACTION_REJECT -> {
+                    result.put("action", "decline")
+                }
+
+                else -> {
+                    return null
+                }
             }
             return result.toString()
         }

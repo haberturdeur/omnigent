@@ -25,14 +25,16 @@ class PrivateInputWebView
             private const val ENABLED = "enabled"
 
             fun isEnabled(context: Context): Boolean =
-                context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
+                context
+                    .getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
                     .getBoolean(ENABLED, true)
 
             fun setEnabled(
                 context: Context,
                 enabled: Boolean,
             ) {
-                context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
+                context
+                    .getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
                     .edit()
                     .putBoolean(ENABLED, enabled)
                     .apply()

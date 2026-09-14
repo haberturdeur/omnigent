@@ -215,7 +215,12 @@ class NativeNotificationManagerTest {
 
         assertEquals(
             "First",
-            shadow.getNotification("session:session-a", 3).extras.getString(Notification.EXTRA_TITLE),
+            shadow
+                .getNotification(
+                    "session:session-a",
+                    3,
+                ).extras
+                .getString(Notification.EXTRA_TITLE),
         )
     }
 

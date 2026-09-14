@@ -40,7 +40,8 @@ class PushRegistrationManager(
             val vapid = runCatching { fetchVapidKey(serverUrl) }.getOrNull()
             if (vapid == null) {
                 activity.runOnUiThread {
-                    Toast.makeText(activity, R.string.push_server_unavailable, Toast.LENGTH_LONG)
+                    Toast
+                        .makeText(activity, R.string.push_server_unavailable, Toast.LENGTH_LONG)
                         .show()
                 }
                 return@execute
@@ -55,11 +56,12 @@ class PushRegistrationManager(
                             vapid = vapid,
                         )
                     } else {
-                        Toast.makeText(
-                            activity,
-                            R.string.push_distributor_unavailable,
-                            Toast.LENGTH_LONG,
-                        ).show()
+                        Toast
+                            .makeText(
+                                activity,
+                                R.string.push_distributor_unavailable,
+                                Toast.LENGTH_LONG,
+                            ).show()
                     }
                 }
             }
@@ -69,7 +71,8 @@ class PushRegistrationManager(
     fun disable() {
         val instance = currentInstance()
         incrementEpoch(instance)
-        prefs.edit()
+        prefs
+            .edit()
             .putBoolean(key(KEY_ENABLED, instance), false)
             .putBoolean(key(KEY_PENDING, instance), false)
             .apply()
@@ -86,7 +89,8 @@ class PushRegistrationManager(
             markRegistrationFailed(instance)
             return false
         }
-        prefs.edit()
+        prefs
+            .edit()
             .putString(key(KEY_ENDPOINT, instance), endpoint.url)
             .putString(key(KEY_P256DH, instance), keys.pubKey)
             .putString(key(KEY_AUTH, instance), keys.auth)
@@ -110,15 +114,15 @@ class PushRegistrationManager(
     fun serverUrlFor(instance: String): String? =
         prefs.getString(key(KEY_SERVER, instance), null)?.let(::normalizeServerUrl)
 
-    fun isEnabled(instance: String): Boolean =
-        prefs.getBoolean(key(KEY_ENABLED, instance), false)
+    fun isEnabled(instance: String): Boolean = prefs.getBoolean(key(KEY_ENABLED, instance), false)
 
     /** Ignore old-account pushes until the authenticated page reclaims this endpoint. */
     fun suspendForAuthentication() {
         val instance = currentInstance()
         if (!prefs.getBoolean(key(KEY_ENABLED, instance), false)) return
         incrementEpoch(instance)
-        prefs.edit()
+        prefs
+            .edit()
             .putBoolean(key(KEY_ENABLED, instance), false)
             .putBoolean(key(KEY_PENDING, instance), true)
             .apply()
@@ -126,7 +130,8 @@ class PushRegistrationManager(
 
     fun markRegistrationFailed(instance: String) {
         incrementEpoch(instance)
-        prefs.edit()
+        prefs
+            .edit()
             .putBoolean(key(KEY_ENABLED, instance), false)
             .putBoolean(key(KEY_PENDING, instance), false)
             .apply()
@@ -135,7 +140,8 @@ class PushRegistrationManager(
     fun markUnregistered(instance: String) {
         incrementEpoch(instance)
         deleteFromServer(instance)
-        prefs.edit()
+        prefs
+            .edit()
             .putBoolean(key(KEY_ENABLED, instance), false)
             .putBoolean(key(KEY_PENDING, instance), false)
             .remove(key(KEY_ENDPOINT, instance))
@@ -144,7 +150,10 @@ class PushRegistrationManager(
             .apply()
     }
 
-    private fun uploadStoredEndpoint(instance: String, epoch: Int) {
+    private fun uploadStoredEndpoint(
+        instance: String,
+        epoch: Int,
+    ) {
         val serverUrl = serverUrlFor(instance) ?: return
         val endpoint = prefs.getString(key(KEY_ENDPOINT, instance), null) ?: return
         val p256dh = prefs.getString(key(KEY_P256DH, instance), null) ?: return
@@ -162,7 +171,8 @@ class PushRegistrationManager(
                 prefs.getInt(key(KEY_EPOCH, instance), 0) == epoch &&
                 prefs.getBoolean(key(KEY_PENDING, instance), false)
             ) {
-                prefs.edit()
+                prefs
+                    .edit()
                     .putBoolean(key(KEY_ENABLED, instance), true)
                     .putBoolean(key(KEY_PENDING, instance), false)
                     .apply()
@@ -233,11 +243,14 @@ class PushRegistrationManager(
         }
     }
 
-    private fun subscriptionJson(endpoint: String, p256dh: String, auth: String) =
-        JSONObject()
-            .put("endpoint", endpoint)
-            .put("keys", JSONObject().put("p256dh", p256dh).put("auth", auth))
-            .toString()
+    private fun subscriptionJson(
+        endpoint: String,
+        p256dh: String,
+        auth: String,
+    ) = JSONObject()
+        .put("endpoint", endpoint)
+        .put("keys", JSONObject().put("p256dh", p256dh).put("auth", auth))
+        .toString()
 
     private fun deviceId(): String =
         prefs.getString(KEY_DEVICE_ID, null)
@@ -250,7 +263,10 @@ class PushRegistrationManager(
         return "server-" + digest.take(12).joinToString("") { "%02x".format(it) }
     }
 
-    private fun key(base: String, instance: String) = "$base.$instance"
+    private fun key(
+        base: String,
+        instance: String,
+    ) = "$base.$instance"
 
     private fun incrementEpoch(instance: String): Int =
         synchronized(PREFS_LOCK) {

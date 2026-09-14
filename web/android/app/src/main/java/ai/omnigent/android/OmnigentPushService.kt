@@ -9,7 +9,10 @@ import org.unifiedpush.android.connector.data.PushMessage
 
 /** Receives decrypted RFC 8291 payloads from the installed UnifiedPush distributor. */
 class OmnigentPushService : PushService() {
-    override fun onMessage(message: PushMessage, instance: String) {
+    override fun onMessage(
+        message: PushMessage,
+        instance: String,
+    ) {
         if (!message.decrypted) return
         val registration = PushRegistrationManager(this)
         if (!registration.isEnabled(instance)) return
@@ -56,13 +59,19 @@ class OmnigentPushService : PushService() {
         }
     }
 
-    override fun onNewEndpoint(endpoint: PushEndpoint, instance: String) {
+    override fun onNewEndpoint(
+        endpoint: PushEndpoint,
+        instance: String,
+    ) {
         if (!PushRegistrationManager(this).storeAndUpload(endpoint, instance)) {
             Toast.makeText(this, R.string.push_webpush_required, Toast.LENGTH_LONG).show()
         }
     }
 
-    override fun onRegistrationFailed(reason: FailedReason, instance: String) {
+    override fun onRegistrationFailed(
+        reason: FailedReason,
+        instance: String,
+    ) {
         PushRegistrationManager(this).markRegistrationFailed(instance)
         Toast.makeText(this, R.string.push_registration_failed, Toast.LENGTH_LONG).show()
     }
@@ -71,7 +80,10 @@ class OmnigentPushService : PushService() {
         PushRegistrationManager(this).markUnregistered(instance)
     }
 
-    private fun parseApproval(value: JSONObject, instance: String): NotificationApproval? {
+    private fun parseApproval(
+        value: JSONObject,
+        instance: String,
+    ): NotificationApproval? {
         val sessionId = value.optString("session_id").takeIf { it.isNotBlank() } ?: return null
         val elicitationId =
             value.optString("elicitation_id").takeIf { it.isNotBlank() } ?: return null

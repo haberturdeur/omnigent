@@ -111,8 +111,7 @@ class NativeNotificationManager(
                         requestCode,
                         serverUrl = serverUrl,
                     ),
-                )
-                .setAutoCancel(true)
+                ).setAutoCancel(true)
                 .setOnlyAlertOnce(true)
                 .setDefaults(NotificationCompat.DEFAULT_ALL)
         event.approval?.let { approval ->
@@ -124,10 +123,13 @@ class NativeNotificationManager(
             approval.persistent?.let { persistent ->
                 val action =
                     when (persistent) {
-                        NotificationApproval.PersistentAction.ALLOW_ALL_EDITS ->
+                        NotificationApproval.PersistentAction.ALLOW_ALL_EDITS -> {
                             ApprovalActionReceiver.ACTION_ALLOW_ALL_EDITS
-                        NotificationApproval.PersistentAction.REMEMBER ->
+                        }
+
+                        NotificationApproval.PersistentAction.REMEMBER -> {
                             ApprovalActionReceiver.ACTION_REMEMBER
+                        }
                     }
                 builder.addAction(
                     R.drawable.ic_notification,
@@ -227,10 +229,19 @@ class NativeNotificationManager(
         rememberDelivery("fallback:$sessionId:${SessionAttentionEvent.Kind.NEEDS_INPUT.name}")
     }
 
-    private fun rememberSessionNotification(sessionId: String, notificationId: String) {
+    private fun rememberSessionNotification(
+        sessionId: String,
+        notificationId: String,
+    ) {
         synchronized(DELIVERY_LOCK) {
             val prefs = context.getSharedPreferences(DELIVERY_PREFS, Context.MODE_PRIVATE)
-            val ids = prefs.getStringSet("$SESSION_PREFIX$sessionId", emptySet()).orEmpty().toMutableSet()
+            val ids =
+                prefs
+                    .getStringSet(
+                        "$SESSION_PREFIX$sessionId",
+                        emptySet(),
+                    ).orEmpty()
+                    .toMutableSet()
             ids.add(notificationId)
             prefs.edit().putStringSet("$SESSION_PREFIX$sessionId", ids).commit()
         }
@@ -243,14 +254,26 @@ class NativeNotificationManager(
             .orEmpty()
             .toSet()
 
-    private fun forgetSessionNotification(sessionId: String, notificationId: String) {
+    private fun forgetSessionNotification(
+        sessionId: String,
+        notificationId: String,
+    ) {
         synchronized(DELIVERY_LOCK) {
             val prefs = context.getSharedPreferences(DELIVERY_PREFS, Context.MODE_PRIVATE)
-            val ids = prefs.getStringSet("$SESSION_PREFIX$sessionId", emptySet()).orEmpty().toMutableSet()
+            val ids =
+                prefs
+                    .getStringSet(
+                        "$SESSION_PREFIX$sessionId",
+                        emptySet(),
+                    ).orEmpty()
+                    .toMutableSet()
             ids.remove(notificationId)
             val edit = prefs.edit()
-            if (ids.isEmpty()) edit.remove("$SESSION_PREFIX$sessionId")
-            else edit.putStringSet("$SESSION_PREFIX$sessionId", ids)
+            if (ids.isEmpty()) {
+                edit.remove("$SESSION_PREFIX$sessionId")
+            } else {
+                edit.putStringSet("$SESSION_PREFIX$sessionId", ids)
+            }
             edit.commit()
         }
     }
@@ -361,7 +384,10 @@ class NativeNotificationManager(
         edit.commit()
     }
 
-    private fun releaseDelivery(key: String, claim: Long) {
+    private fun releaseDelivery(
+        key: String,
+        claim: Long,
+    ) {
         synchronized(DELIVERY_LOCK) {
             val prefs = context.getSharedPreferences(DELIVERY_PREFS, Context.MODE_PRIVATE)
             val storedKey = "$DELIVERY_PREFIX$key"
@@ -430,6 +456,8 @@ class NativeNotificationManager(
         private val DELIVERY_LOCK = Any()
     }
 
-    private fun notificationTag(sessionId: String, notificationId: String?): String =
-        notificationId?.let { "notification:$it" } ?: "session:$sessionId"
+    private fun notificationTag(
+        sessionId: String,
+        notificationId: String?,
+    ): String = notificationId?.let { "notification:$it" } ?: "session:$sessionId"
 }

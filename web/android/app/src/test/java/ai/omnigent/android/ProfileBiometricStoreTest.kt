@@ -79,7 +79,10 @@ class ProfileBiometricStoreTest {
     private fun preferences() =
         activity.getSharedPreferences("private-profile-credentials", Context.MODE_PRIVATE)
 
-    private fun storageKey(serverOrigin: String, profileId: String): String =
+    private fun storageKey(
+        serverOrigin: String,
+        profileId: String,
+    ): String =
         MessageDigest
             .getInstance("SHA-256")
             .digest("$serverOrigin\u0000$profileId".toByteArray(Charsets.UTF_8))
