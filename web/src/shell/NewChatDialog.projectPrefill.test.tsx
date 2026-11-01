@@ -1672,3 +1672,8 @@ describe("NewChatLandingScreen global always-use-worktree default", () => {
     expect(body.git).toBeUndefined();
   });
 });
+
+vi.mock("@/lib/profilesApi", () => {
+  const activeProfile = { id: "personal", config: {} };
+  return { useProfiles: () => ({ activeProfile, isLoading: false }) };
+});

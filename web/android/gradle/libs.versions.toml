@@ -1,6 +1,7 @@
 # AndroidX Core requires compileSdk 37; AGP 9.4 requires Gradle 9.6 or newer.
 # CI runs Gradle and Robolectric on JDK 21; app bytecode targets Java 17.
 [versions]
+unifiedPush = "3.0.10"
 agp = "9.4.1"
 androidxCore = "1.19.1"
 androidxActivity = "1.12.4"
@@ -19,6 +20,7 @@ uiautomator = "2.4.0"
 playPublisher = "4.1.1"
 
 [libraries]
+unifiedpush-connector = { group = "org.unifiedpush.android", name = "connector", version.ref = "unifiedPush" }
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "androidxCore" }
 androidx-activity = { group = "androidx.activity", name = "activity-ktx", version.ref = "androidxActivity" }
 androidx-appcompat = { group = "androidx.appcompat", name = "appcompat", version.ref = "androidxAppcompat" }

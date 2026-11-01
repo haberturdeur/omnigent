@@ -576,6 +576,26 @@ describe("touchScrollPayload", () => {
     return { previousY, currentY, clientX };
   }
 
+  it.each([false, true])(
+    "uses arrow keys in an alternate screen (application mode %s)",
+    (applicationCursorKeysMode) => {
+      const modes = { ...noTracking, alternateScreen: true, applicationCursorKeysMode };
+      const prefix = applicationCursorKeysMode ? "\x1bO" : "\x1b[";
+      expect(touchScrollPayload(drag(100, 132), modes, screen, 0)).toEqual({
+        consume: true,
+        lines: 0,
+        data: `${prefix}A`.repeat(2),
+        partial: 0,
+      });
+      expect(touchScrollPayload(drag(132, 100), modes, screen, 0).data).toBe(
+        `${prefix}B`.repeat(2),
+      );
+      const large = touchScrollPayload(drag(16000, 0), modes, screen, 0.5);
+      expect(large.data).toBe(`${prefix}B`.repeat(WHEEL_REPORTS_MAX_PER_EVENT));
+      expect(large.partial).toBe(0);
+    },
+  );
+
   it("leaves the gesture to the browser when layout is unmeasurable, keeping the carry", () => {
     // WHY: pre-mount (or jsdom) there is no grid to convert pixels to lines;
     // consuming the event would swallow the gesture with no effect at all.
@@ -1097,6 +1117,20 @@ describe("TerminalSession", () => {
 
     expect(copy.defaultPrevented).toBe(true);
     expect(setData).not.toHaveBeenCalled();
+    session.dispose();
+  });
+
+  it("refocuses an already focused textarea when reopening the mobile keyboard", () => {
+    const { session } = makeSession();
+    const term = (session as unknown as { term: Terminal }).term;
+    term.focus();
+    expect(document.activeElement).toBe(term.textarea);
+    const blur = vi.spyOn(term.textarea!, "blur");
+    session.focus();
+    expect(blur).not.toHaveBeenCalled();
+    session.focus(true);
+    expect(blur).toHaveBeenCalledOnce();
+    expect(document.activeElement).toBe(term.textarea);
     session.dispose();
   });
 

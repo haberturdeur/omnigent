@@ -538,6 +538,7 @@ class ConversationStore(ABC):
         terminal_launch_args: list[str] | None = None,
         conversation_id: str | None = None,
         project_id: str | None = None,
+        profile_id: str | None = None,
         inference_snapshot: dict[str, Any] | None = None,
         labels: dict[str, str] | None = None,
         reasoning_effort: str | None = None,
@@ -899,6 +900,7 @@ class ConversationStore(ABC):
         pinned: bool = False,
         pinned_owner: str | None = None,
         title: str | None = None,
+        profile_id: str | None = None,
     ) -> PagedList[Conversation]:
         """
         List conversations with cursor-based pagination.
@@ -1305,6 +1307,7 @@ class ConversationStore(ABC):
         self,
         accessible_by: str | None = None,
         owned_by: str | None = None,
+        profile_id: str | None = None,
     ) -> list[str]:
         """
         Return all distinct sidebar "project" names, ordered ascending.
@@ -2002,6 +2005,7 @@ class ConversationStore(ABC):
         parent_conversation_id: str | None = None,
         runner_id: str | None = None,
         project_id: str | None = None,
+        profile_id: str | None = None,
         host_id: str | None = None,
         inference_snapshot: dict[str, Any] | None = None,
         created_by: str | None = None,

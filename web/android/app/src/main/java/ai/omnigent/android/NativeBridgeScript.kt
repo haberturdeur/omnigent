@@ -239,6 +239,10 @@ object NativeBridgeScript {
               if (scheme !== "light" && scheme !== "dark" && scheme !== "system") return;
               post({ method: "setColorScheme", scheme });
             },
+            dismissSessionNotifications(sessionId) {
+              if (typeof sessionId !== "string" || !sessionId) return;
+              post({ method: "dismissSessionNotifications", sessionId });
+            },
             setBadgeCount(count, options) {
               // Note: unlike iOS, the native side ignores count <= 0 — Android has
               // no badge-clear API, so a previously-set badge can't be cleared
@@ -299,6 +303,7 @@ object NativeBridgeScript {
               post({ method: "signOutOfServer" });
               return pending;
             },
+            openNotificationSettings() { post({ method: "openNotificationSettings" }); },
             openServerSetup() {
               post({ method: "openServerSetup" });
             },

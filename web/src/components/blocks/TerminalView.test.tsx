@@ -1741,3 +1741,49 @@ describe("automatic reconnect", () => {
     expect(screen.getByText("Bridge closed: code 4405")).toBeInTheDocument();
   });
 });
+
+describe("terminal touch keyboard", () => {
+  async function mount(props = {}) {
+    render(<TerminalView sessionId="conv_abc" terminalId="terminal_bash_s1" {...props} />);
+    await waitFor(() => expect(terminalSessionMock.instances).toHaveLength(1));
+    const terminal = terminalSessionMock.instances[0];
+    act(() => terminal.onState({ kind: "connected" }));
+    return terminal;
+  }
+
+  const touch = { identifier: 1, clientX: 40, clientY: 40 };
+
+  it("opens the keyboard synchronously on a tap", async () => {
+    const terminal = await mount();
+    fireEvent.touchStart(terminal.container, { touches: [touch] });
+    fireEvent.touchEnd(terminal.container, { touches: [], changedTouches: [touch] });
+    expect(terminal.focus).toHaveBeenCalledWith(true);
+  });
+
+  it.each(["swipe", "cancel", "multitouch", "hold"])("does not focus for %s", async (gesture) => {
+    const terminal = await mount();
+    const now = vi.spyOn(Date, "now").mockReturnValue(1000);
+    fireEvent.touchStart(terminal.container, { touches: [touch] });
+    if (gesture === "swipe") {
+      fireEvent.touchMove(terminal.container, { touches: [{ ...touch, clientY: 90 }] });
+    } else if (gesture === "cancel") {
+      fireEvent.touchCancel(terminal.container);
+    } else if (gesture === "multitouch") {
+      fireEvent.touchStart(terminal.container, { touches: [touch, { ...touch, identifier: 2 }] });
+    } else {
+      now.mockReturnValue(1700);
+    }
+    fireEvent.touchEnd(terminal.container, { touches: [], changedTouches: [touch] });
+    expect(terminal.focus).not.toHaveBeenCalled();
+  });
+
+  it.each([{ readOnly: true }, { active: false }])(
+    "does not focus an unavailable input %j",
+    async (props) => {
+      const terminal = await mount(props);
+      fireEvent.touchStart(terminal.container, { touches: [touch] });
+      fireEvent.touchEnd(terminal.container, { touches: [], changedTouches: [touch] });
+      expect(terminal.focus).not.toHaveBeenCalled();
+    },
+  );
+});

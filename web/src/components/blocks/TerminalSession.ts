@@ -587,7 +587,7 @@ export const TOUCH_SCROLL_SLOP_PX = 8;
 
 export function touchScrollPayload(
   move: { previousY: number; currentY: number; clientX: number },
-  mouse: WheelMouseState,
+  mouse: WheelMouseState & { alternateScreen?: boolean; applicationCursorKeysMode?: boolean },
   screen: WheelScreenMetrics | null,
   partial: number,
 ): { consume: boolean; lines: number; data: string; partial: number } {
@@ -596,6 +596,19 @@ export function touchScrollPayload(
   }
   const total = partial + (move.previousY - move.currentY) / screen.cellHeight;
   const whole = Math.trunc(total);
+  if (mouse.mouseTrackingMode === "none" && mouse.alternateScreen) {
+    const lines = Math.max(
+      -WHEEL_REPORTS_MAX_PER_EVENT,
+      Math.min(WHEEL_REPORTS_MAX_PER_EVENT, whole),
+    );
+    const prefix = mouse.applicationCursorKeysMode ? "\x1bO" : "\x1b[";
+    return {
+      consume: true,
+      lines: 0,
+      data: `${prefix}${lines < 0 ? "A" : "B"}`.repeat(Math.abs(lines)),
+      partial: lines === whole ? total - whole : 0,
+    };
+  }
   if (mouse.mouseTrackingMode === "none" || !mouse.sgrEncoding) {
     // Unlike the wheel path (which defers non-SGR tracking to xterm's
     // native handler), touch has no native fallback — scroll the buffer,
@@ -927,6 +940,8 @@ export class TerminalSession {
         const result = touchScrollPayload(
           { previousY: this.touchLastY, currentY: touch.clientY, clientX: touch.clientX },
           {
+            alternateScreen: this.term.buffer.active.type === "alternate",
+            applicationCursorKeysMode: this.term.modes.applicationCursorKeysMode,
             mouseTrackingMode: this.term.modes.mouseTrackingMode,
             sgrEncoding: this.sgrMouseEncodingActive(),
           },
@@ -985,7 +1000,11 @@ export class TerminalSession {
    * hidden (a pre-warmed attach behind the chat view), so the view calls
    * this when the surface is revealed.
    */
-  focus(): void {
+  focus(reopenKeyboard = false): void {
+    // Android may retain focus after the user dismisses the keyboard.
+    if (reopenKeyboard && this.term.textarea === document.activeElement) {
+      this.term.textarea?.blur();
+    }
     this.term.focus();
   }
 

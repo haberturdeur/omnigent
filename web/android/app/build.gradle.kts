@@ -170,6 +170,7 @@ play {
 }
 
 dependencies {
+    implementation(libs.unifiedpush.connector)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity)
     implementation(libs.androidx.appcompat)

@@ -7,6 +7,13 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 
 import { SidebarHeaderActions } from "./SidebarHeaderActions";
 
+const { openServerSettingsSpy } = vi.hoisted(() => ({ openServerSettingsSpy: vi.fn() }));
+
+vi.mock("@/lib/nativeBridge", () => ({
+  hasNativeServerSettings: () => true,
+  openNativeServerSettings: openServerSettingsSpy,
+}));
+
 afterEach(cleanup);
 
 describe("SidebarHeaderActions shortcut hints", () => {
@@ -47,5 +54,21 @@ describe("SidebarHeaderActions shortcut hints", () => {
     expect(
       Array.from(content.querySelectorAll('[data-slot="kbd"]'), (key) => key.textContent),
     ).toEqual(keys);
+  });
+});
+
+describe("SidebarHeaderActions on Android", () => {
+  it("opens server settings directly from the sidebar header", () => {
+    render(
+      <MemoryRouter>
+        <TooltipProvider>
+          <SidebarHeaderActions expanded onToggle={() => undefined} />
+        </TooltipProvider>
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Server and app settings" }));
+
+    expect(openServerSettingsSpy).toHaveBeenCalledOnce();
   });
 });

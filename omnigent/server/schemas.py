@@ -1686,6 +1686,7 @@ class _SessionCreateRequestBase(_SandboxProfileSelection):
         message event instead.
     """
 
+    profile_id: str | None = None
     inference_configuration_revision: str | None = None
 
     # Declared here, in the legacy field position, so validation errors keep
@@ -1932,6 +1933,7 @@ class SessionCreateMetadata(_SandboxProfileSelection):
         valid with ``host_type: "managed"``.
     """
 
+    profile_id: str | None = None
     inference_configuration_revision: str | None = None
 
     mcp_registry_services: list[McpRegistryServiceId] = Field(default_factory=list, max_length=40)
@@ -2488,6 +2490,7 @@ class SessionResponse(BaseModel):
     # unfiled. Distinct from the legacy ``omni_project`` label (surfaced in
     # ``labels``); set/cleared via ``PATCH /v1/sessions/{id}`` and filtered on
     # ``GET /v1/sessions?project=``.
+    profile_id: str | None = None
     project_id: str | None = None
 
 
@@ -3167,6 +3170,7 @@ class SessionListItem(BaseModel):
         "not known yet". ``None`` on servers without PR storage.
     """
 
+    profile_id: str | None = None
     id: str
     agent_id: str
     agent_name: str | None = None
@@ -5433,6 +5437,7 @@ class CreateProjectRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    profile_id: str | None = None
     name: str
     config: dict[str, Any] = Field(default_factory=dict)
 

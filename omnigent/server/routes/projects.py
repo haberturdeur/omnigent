@@ -24,6 +24,7 @@ from omnigent.entities import Project
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.server.auth import AuthProvider
 from omnigent.server.routes._auth_helpers import require_user
+from omnigent.server.routes.profiles import resolve_profile
 from omnigent.server.routes.sessions import announce_projects_changed
 from omnigent.server.schemas import (
     CreateProjectRequest,
@@ -47,6 +48,7 @@ def _to_response(project: Project) -> dict[str, Any]:
         "created_at": project.created_at,
         "updated_at": project.updated_at,
         "config": project.config,
+        "profile_id": project.profile_id,
     }
 
 
@@ -83,6 +85,7 @@ def create_projects_router(
             body.name,
             user_id,
             body.config,
+            profile_id=await resolve_profile(request, user_id, body.profile_id),
         )
         # Push the change to the owner's other connected clients so their
         # sidebars pick up the new folder without a reload.
@@ -99,9 +102,13 @@ def create_projects_router(
         """
         user_id = require_user(request, auth_provider)
 
+        profile_id = await resolve_profile(
+            request, user_id, request.query_params.get("profile_id")
+        )
+
         def read_projects() -> list[Project]:
             return apply_project_order(
-                project_store.list(user_id=user_id),
+                project_store.list(user_id=user_id, profile_id=profile_id),
                 project_store.get_order(user_id=user_id),
                 project_id=lambda p: p.id,
                 project_name=lambda p: p.name,

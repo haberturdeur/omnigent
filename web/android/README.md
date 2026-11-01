@@ -43,6 +43,39 @@ file **uploads** (`<input type=file>` via `WebChromeClient.onShowFileChooser`),
 and **microphone** capture for voice input (`onPermissionRequest`, granted to
 the pinned origin only, with a runtime `RECORD_AUDIO` request).
 
+### Background notifications
+
+Open the sidebar's server menu, choose **Android notifications…**, then
+**Enable UnifiedPush**. The app uses an installed UnifiedPush distributor (such
+as ntfy or NextPush) and encrypted Web Push; it requires no Firebase SDK or
+Google Play Services. Each registration belongs to its configured server and
+signed-in user. Notifications can open their source server and session. Binary
+approvals offer the applicable approval and rejection actions; structured
+questions open in the app.
+
+**Enable Polling Fallback** provides an alternative when no distributor is
+installed. A foreground service checks sessions every ten seconds and shows a
+persistent monitor notification with a Stop action. Successfully registering
+UnifiedPush stops polling; enabling polling disables UnifiedPush. Events are
+deduplicated, and viewing a session acknowledges and dismisses its notifications.
+Recent desktop activity delays phone delivery for up to sixty seconds.
+
+Background transports currently use the self-hosted server's WebView cookie.
+They are offered for ordinary server connections, including OIDC, but not the
+separate native Databricks workspace authentication flow. Renew an expired
+sign-in by reopening the app. Notification titles and approval descriptions may
+appear on the Android lock screen; ordinary profiles do not redact them.
+
+The server requires public Web Push endpoints by default. For a trusted private
+push service, explicitly set `OMNIGENT_WEBPUSH_ALLOW_PRIVATE_ENDPOINTS=true`.
+
+To verify on a device: grant notification permission, enable UnifiedPush, start
+a session and background the app. Confirm one notification when the agent
+finishes or needs approval, tap it to return to that session, and confirm it is
+dismissed. Repeat with Polling Fallback and confirm its Stop action stops the
+monitor. These device checks require a running server and a distributor for the
+UnifiedPush case.
+
 ### Deliberately deferred to the web in-page fallbacks
 
 These are iOS-only native chrome; the SPA already renders its own equivalents

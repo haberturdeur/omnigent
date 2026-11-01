@@ -356,6 +356,276 @@ class SqlPreference(OmnigentBase):
     value: Mapped[str] = mapped_column(CompressedText, nullable=False)
 
 
+class SqlProfile(OmnigentBase):
+    """Owner-private switchable context for projects and sessions."""
+
+    __tablename__ = "profiles"
+
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
+    id: Mapped[str] = mapped_column(Uuid16(), primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    user_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    owner_is_anonymous: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    owner_scope: Mapped[str] = mapped_column(String(128), nullable=False)
+    icon: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    color: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    default_slot: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    config: Mapped[str | None] = mapped_column(CompressedText, nullable=True)
+    created_at: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "(user_id IS NULL AND owner_is_anonymous = true AND owner_scope = '') OR "
+            "(user_id IS NOT NULL AND owner_is_anonymous = false AND owner_scope = user_id)",
+            name="ck_profiles_owner_scope",
+        ),
+        CheckConstraint(
+            "(is_default = true AND default_slot = 1) OR "
+            "(is_default = false AND default_slot IS NULL)",
+            name="ck_profiles_default_slot",
+        ),
+        UniqueConstraint(
+            "workspace_id",
+            "owner_is_anonymous",
+            "owner_scope",
+            "default_slot",
+            name="uq_profiles_workspace_owner_default",
+        ),
+        UniqueConstraint(
+            "workspace_id",
+            "owner_is_anonymous",
+            "owner_scope",
+            "name",
+            name="uq_profiles_workspace_owner_name",
+        ),
+        Index("ix_profiles_user_id", "workspace_id", "user_id", "created_at", "id"),
+    )
+
+
+class SqlPushSubscription(OmnigentBase):
+    """Per-user RFC 8030 Web Push endpoint registered by a client device."""
+
+    __tablename__ = "push_subscriptions"
+
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
+    user_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    device_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    endpoint: Mapped[str] = mapped_column(Text, nullable=False)
+    endpoint_hash: Mapped[bytes] = mapped_column(_CKSUM32, nullable=False)
+    p256dh: Mapped[str] = mapped_column(String(128), nullable=False)
+    auth: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    __table_args__ = (
+        Index(
+            "uq_push_subscriptions_endpoint",
+            "workspace_id",
+            "endpoint_hash",
+            unique=True,
+        ),
+        Index("ix_push_subscriptions_user", "workspace_id", "user_id"),
+    )
+
+
+class SqlWebPushConfig(OmnigentBase):
+    """Workspace-scoped VAPID keypair used for Web Push authentication."""
+
+    __tablename__ = "web_push_config"
+
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
+    private_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    public_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class SqlNotificationClient(OmnigentBase):
+    """Recent foreground activity for one signed-in client installation."""
+
+    __tablename__ = "notification_clients"
+
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
+    user_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    device_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    platform: Mapped[str] = mapped_column(String(16), nullable=False)
+    foreground: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=false())
+    last_active_at: Mapped[int] = mapped_column(Integer, nullable=False)
+    mobile_delay_seconds: Mapped[int] = mapped_column(Integer, nullable=False, server_default="60")
+    updated_at: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    __table_args__ = (
+        Index(
+            "ix_notification_clients_user",
+            "workspace_id",
+            "user_id",
+            "last_active_at",
+            "device_id",
+        ),
+    )
+
+
+class SqlNotificationEvent(OmnigentBase):
+    """Canonical server record for one user-visible notification event."""
+
+    __tablename__ = "notification_events"
+
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
+    user_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    notification_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[int] = mapped_column(Integer, nullable=False)
+    acknowledged_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    __table_args__ = (
+        Index(
+            "ix_notification_events_session",
+            "workspace_id",
+            "user_id",
+            "session_id",
+            "acknowledged_at",
+            "notification_id",
+        ),
+    )
+
+
+class SqlNotificationDelivery(OmnigentBase):
+    """Durable Web Push outbox row for one subscription delivery."""
+
+    __tablename__ = "notification_deliveries"
+
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    device_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    notification_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    delivery_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    session_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    endpoint: Mapped[str] = mapped_column(Text, nullable=False)
+    p256dh: Mapped[str] = mapped_column(String(128), nullable=False)
+    auth: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload: Mapped[str] = mapped_column(Text, nullable=False)
+    available_at: Mapped[float] = mapped_column(Float, nullable=False)
+    lease_token: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    lease_expires_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    created_at: Mapped[float] = mapped_column(Float, nullable=False)
+    delivered_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cancelled_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        Index(
+            "ix_notification_deliveries_due",
+            "workspace_id",
+            "delivered_at",
+            "cancelled_at",
+            "available_at",
+            "lease_expires_at",
+            "id",
+        ),
+        Index(
+            "ix_notification_deliveries_session",
+            "workspace_id",
+            "user_id",
+            "session_id",
+            "delivered_at",
+            "cancelled_at",
+            "id",
+        ),
+        UniqueConstraint(
+            "workspace_id",
+            "user_id",
+            "device_id",
+            "notification_id",
+            "delivery_type",
+            name="uq_notification_deliveries_device_event_type",
+        ),
+    )
+
+
+class SqlNotificationIntent(OmnigentBase):
+    """Durable source event consumed before notification delivery is derived."""
+
+    __tablename__ = "notification_intents"
+
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    payload: Mapped[str] = mapped_column(Text, nullable=False)
+    available_at: Mapped[float] = mapped_column(Float, nullable=False)
+    lease_token: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    lease_expires_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    created_at: Mapped[float] = mapped_column(Float, nullable=False)
+    completed_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cancelled_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        Index(
+            "ix_notification_intents_due",
+            "workspace_id",
+            "completed_at",
+            "cancelled_at",
+            "available_at",
+            "lease_expires_at",
+            "id",
+        ),
+        Index(
+            "ix_notification_intents_conversation",
+            "workspace_id",
+            "conversation_id",
+            "completed_at",
+            "cancelled_at",
+            "id",
+        ),
+    )
+
+
 class SqlAccountToken(OmnigentBase):
     """
     SQLAlchemy model for the ``account_tokens`` table.
@@ -642,6 +912,7 @@ class SqlConversationMetadata(OmnigentBase):
         default=current_workspace_id,
     )
     id: Mapped[str] = mapped_column(Uuid16(), primary_key=True)
+    profile_id: Mapped[str | None] = mapped_column(Uuid16(), nullable=True)
     # Enum stored as a stable int code (CONVERSATION_KIND: default=1, sub_agent=2).
     kind: Mapped[int] = mapped_column(SmallInteger, default=1)
     runner_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -729,6 +1000,7 @@ class SqlProject(OmnigentBase):
         default=current_workspace_id,
     )
     id: Mapped[str] = mapped_column(Uuid16(), primary_key=True)
+    profile_id: Mapped[str | None] = mapped_column(Uuid16(), nullable=True)
     name: Mapped[str] = mapped_column(String(256), nullable=False)
     # Owning user identity. String(128) matches session_permissions.user_id and
     # every other user-identity column in this schema.

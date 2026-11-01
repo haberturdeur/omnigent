@@ -117,6 +117,7 @@ from omnigent.server.performance_metrics import (
     set_request_user_agent_for_access_log,
 )
 from omnigent.server.preference_requests import DEFAULT_PREFERENCE_POLICY, PreferencePolicy
+from omnigent.server.push_notifications import PushNotificationDispatcher, PushSubscriptionStore
 from omnigent.server.routes.builtin_agents import create_builtin_agents_router
 from omnigent.server.routes.comments import create_comments_router
 from omnigent.server.routes.default_policies import create_default_policies_router
@@ -127,7 +128,9 @@ from omnigent.server.routes.harnesses import create_harnesses_router
 from omnigent.server.routes.imports import create_imports_router
 from omnigent.server.routes.policy_registry import create_policy_registry_router
 from omnigent.server.routes.preferences import create_preferences_router
+from omnigent.server.routes.profiles import create_profiles_router
 from omnigent.server.routes.projects import create_projects_router
+from omnigent.server.routes.push_notifications import create_push_notifications_router
 from omnigent.server.routes.runner_tunnel import create_runner_tunnel_router
 from omnigent.server.routes.scheduled_tasks import create_scheduled_tasks_router
 from omnigent.server.routes.session_mcp_servers import create_session_mcp_servers_router
@@ -182,6 +185,7 @@ from omnigent.stores.host_store import HostStore
 from omnigent.stores.permission_store import PermissionStore
 from omnigent.stores.policy_store import PolicyStore
 from omnigent.stores.preference_store import PreferenceStore
+from omnigent.stores.profile_store.sqlalchemy_store import SqlAlchemyProfileStore
 from omnigent.stores.project_store import ProjectStore
 from omnigent.stores.scheduled_task_store import ScheduledTaskStore
 from omnigent.stores.scheduled_task_store.dispatch import ScheduledTaskDispatchStore
@@ -2183,11 +2187,22 @@ def create_app(
                 app_inst.state.managed_sandbox_reaper = managed_sandbox_reaper
                 await managed_sandbox_reaper.start()
 
+        from omnigent.runtime.session_stream import configure_notification_sink
+
+        push_dispatcher = PushNotificationDispatcher(
+            store=push_store,
+            conversation_store=conversation_store,
+            permission_store=permission_store,
+        )
+        app_inst.state.push_dispatcher = push_dispatcher
+        uninstall_push_sink = configure_notification_sink(push_dispatcher.observe)
         session_pull_requests.install_refresher(pull_request_refresher)
         try:
             with monitor_event_loop():
                 yield
         finally:
+            uninstall_push_sink()
+            await asyncio.to_thread(push_dispatcher.close)
             session_pull_requests.install_refresher(None)
             await pull_request_refresher.aclose()
             if scheduler_start_retry is not None:
@@ -2240,6 +2255,14 @@ def create_app(
     )
 
     app = FastAPI(title="Omnigent Server", lifespan=_lifespan)
+    profile_store = SqlAlchemyProfileStore(conversation_store.storage_location)
+    app.state.profile_store = profile_store
+    app.state.auth_provider = auth_provider
+    app.include_router(create_profiles_router(profile_store, auth_provider), prefix="/v1")
+    push_store = PushSubscriptionStore(conversation_store.storage_location)
+    app.include_router(
+        create_push_notifications_router(push_store, auth_provider=auth_provider), prefix="/v1"
+    )
     from omnigent.runtime import telemetry
 
     telemetry.instrument_fastapi_app(app)

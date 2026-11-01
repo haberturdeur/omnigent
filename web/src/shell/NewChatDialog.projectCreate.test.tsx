@@ -600,3 +600,8 @@ describe("NewChatLandingScreen project-aware create (first-class project_id)", (
     });
   });
 });
+
+vi.mock("@/lib/profilesApi", () => {
+  const activeProfile = { id: "personal", config: {} };
+  return { useProfiles: () => ({ activeProfile, isLoading: false }) };
+});

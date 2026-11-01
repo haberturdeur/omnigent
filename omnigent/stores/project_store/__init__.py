@@ -49,6 +49,8 @@ class ProjectStore(ABC):
         name: str,
         user_id: str | None,
         config: dict[str, Any] | None = None,
+        *,
+        profile_id: str | None = None,
     ) -> Project:
         """
         Insert a new, empty project.
@@ -78,7 +80,7 @@ class ProjectStore(ABC):
         ...
 
     @abstractmethod
-    def list(self, *, user_id: str | None) -> list[Project]:
+    def list(self, *, user_id: str | None, profile_id: str | None = None) -> list[Project]:
         """
         List the owner's projects ordered by ``created_at ASC, id ASC``.
 

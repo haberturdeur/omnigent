@@ -1,3 +1,4 @@
+import { activeProfileId } from "./activeProfile";
 // Persistent WebSocket client for `WS /v1/sessions/updates`.
 //
 // Replaces the sidebar's 4 s HTTP poll of `GET /v1/sessions` with a single
@@ -77,11 +78,11 @@ export const HEALTHY_CONNECTION_MS = 5_000;
  * @returns The fully-qualified WebSocket URL.
  */
 function buildUpdatesUrl(): string {
-  const path = "/v1/sessions/updates";
+  const path = `/v1/sessions/updates?profile_id=${encodeURIComponent(activeProfileId())}`;
   if (!isHostRoutingEnabled()) return resolveWebSocketUrl(path);
   const sliceKey = modalHostId();
   return resolveWebSocketUrl(
-    sliceKey ? `${path}?omnigent_slice_key=${encodeURIComponent(sliceKey)}` : path,
+    sliceKey ? `${path}&omnigent_slice_key=${encodeURIComponent(sliceKey)}` : path,
   );
 }
 

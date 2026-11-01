@@ -198,6 +198,7 @@ from omnigent.server.routes._sessions.orchestration import (
     _validate_session_model_selection,
     ensure_runner_connected,
 )
+from omnigent.server.routes.profiles import resolve_profile
 from omnigent.server.sandbox_profile_launch import prepare_profile, record_profile
 from omnigent.server.schemas import (
     AutomaticSessionRenameRequest,
@@ -220,6 +221,7 @@ from omnigent.server.schemas import (
     UpdateSessionRequest,
 )
 from omnigent.server.session_orchestration import require_orchestration_source
+from omnigent.server.session_profiles import resolve_session_profile
 from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.artifact_store import ArtifactStore
 from omnigent.stores.comment_store import CommentStore
@@ -1310,6 +1312,13 @@ def register_core_routes(
             project_store=project_store,
         )
         parsed_metadata = project_resolution.body
+        parsed_metadata = parsed_metadata.model_copy(
+            update={
+                "profile_id": await resolve_session_profile(
+                    request, parsed_metadata, conversation_store, project_store
+                ),
+            }
+        )
         await _check_initial_input(request, parsed_metadata.initial_input)
         creation_metadata(
             parent_session_id=parsed_metadata.parent_session_id,
@@ -1568,11 +1577,13 @@ def register_core_routes(
         """
         user_id = _require_user(request, auth_provider)
 
+        profile_id = await resolve_profile(request, user_id)
+
         def _list_union() -> list[SessionProjectSummary]:
             # First-class first so its id wins when a name exists in both.
             by_name: dict[str, SessionProjectSummary] = {}
             if project_store is not None:
-                for proj in project_store.list(user_id=user_id):
+                for proj in project_store.list(user_id=user_id, profile_id=profile_id):
                     icon = proj.config.get("icon")
                     by_name[proj.name] = SessionProjectSummary(
                         id=proj.id,
@@ -1580,7 +1591,9 @@ def register_core_routes(
                         icon=icon if isinstance(icon, str) else None,
                     )
             # Legacy path: label-derived projects (id=None unless already first-class).
-            for name in sorted(conversation_store.list_projects(owned_by=user_id)):
+            for name in sorted(
+                conversation_store.list_projects(owned_by=user_id, profile_id=profile_id)
+            ):
                 by_name.setdefault(name, SessionProjectSummary(id=None, name=name))
             from omnigent.stores.project_store import apply_project_order
 
@@ -1809,6 +1822,7 @@ def register_core_routes(
         project: str | None = Query(default=None),
         pinned: bool = Query(default=False),
         visibility: str = Query(default="all", pattern="^(all|mine|shared|archived)$"),
+        profile_id: str | None = Query(default=None),
     ) -> PaginatedList:
         """
         List sessions with cursor-based pagination.
@@ -1959,6 +1973,9 @@ def register_core_routes(
             pinned=pinned,
             # Pins are per-user: filter to the caller's own pin key.
             pinned_owner=user_id,
+            profile_id=(await resolve_profile(request, user_id, profile_id))
+            if (profile_id or request.headers.get("X-Omnigent-Profile")) and visibility != "shared"
+            else None,
         )
         # Side chats surface only as Workspace-rail tabs, so drop any
         # side-chat-labeled fork from the sidebar list (it is still a normal
@@ -2167,6 +2184,7 @@ def register_core_routes(
     async def _fetch_watched_items(
         watched: list[str],
         user_id: str | None,
+        profile_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """
         Build current list-item payloads for the watched ids.
@@ -2228,6 +2246,22 @@ def register_core_routes(
             ]
 
         convs = await asyncio.to_thread(_load_sessions, accessible)
+        if profile_id is not None:
+            convs = [
+                conv
+                for conv in convs
+                if conv.profile_id == profile_id
+                or (
+                    permission_store is not None
+                    and (
+                        _permission_level_from_grants(
+                            user_id, perms_by_conv.get(conv.id, []), False
+                        )
+                        or 0
+                    )
+                    < LEVEL_OWNER
+                )
+            ]
         if not convs:
             return []
         conv_ids = [c.id for c in convs]
@@ -2329,6 +2363,12 @@ def register_core_routes(
         # to the request's user; this handler task is per-connection, so the
         # binding cannot leak across sockets.
         set_current_user_id(user_id)
+        selected_profile = websocket.query_params.get("profile_id")
+        profile_id = (
+            await resolve_profile(websocket, user_id, selected_profile)
+            if selected_profile
+            else None
+        )
         await websocket.accept()
         _logger.info(
             "session-updates stream connected",
@@ -2369,7 +2409,7 @@ def register_core_routes(
         async def _emit_snapshot() -> None:
             """Send a full snapshot for the current watch-set and reset the
             diff baseline to it."""
-            items = await _fetch_watched_items(watched, user_id)
+            items = await _fetch_watched_items(watched, user_id, profile_id)
             dumps = {item["id"]: item for item in items}
             last_sent.clear()
             last_sent.update(dumps)
@@ -2381,7 +2421,7 @@ def register_core_routes(
             been idle."""
             nonlocal last_send_monotonic
             if watched:
-                items = await _fetch_watched_items(watched, user_id)
+                items = await _fetch_watched_items(watched, user_id, profile_id)
                 current = {item["id"]: item for item in items}
                 changed = [dump for cid, dump in current.items() if last_sent.get(cid) != dump]
                 # Removed = a still-watched id that no longer resolves (lost
@@ -2510,7 +2550,7 @@ def register_core_routes(
                         if sid in watched:
                             continue
                         try:
-                            items = await _fetch_watched_items([sid], user_id)
+                            items = await _fetch_watched_items([sid], user_id, profile_id)
                             if items:
                                 await _send({"type": "changed", "items": items})
                         except WebSocketDisconnect:
@@ -3777,6 +3817,12 @@ def register_core_routes(
                 )
                 if owned is None:
                     raise OmnigentError("Project not found", code=ErrorCode.NOT_FOUND)
+                current = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+                if current is not None and current.profile_id != owned.profile_id:
+                    raise OmnigentError(
+                        "Move the session to this profile before filing it",
+                        code=ErrorCode.CONFLICT,
+                    )
                 filed = await asyncio.to_thread(
                     conversation_store.set_conversation_project,
                     session_id,

@@ -31,6 +31,7 @@ import { useNewShellHotkey } from "@/hooks/useNewShellHotkey";
 import { useSettingsHotkey } from "@/hooks/useSettingsHotkey";
 import { useIsEmbedded } from "@/lib/embedded";
 import { AgentInfoContent, agentHasInfo } from "@/components/AgentInfo";
+import { useNotificationPresence } from "@/hooks/useNotificationPresence";
 import { useIdleNotifications } from "@/hooks/useIdleNotifications";
 import { ArcaShutdownToast } from "@/components/ArcaShutdownToast";
 import { useSeedReadState } from "@/hooks/useUnseenConversations";
@@ -612,6 +613,7 @@ function AppShellImpl() {
   // the active conversation id, which suppresses the notification/badge for
   // the session the user is actively viewing.
   useIdleNotifications(conversationId);
+  useNotificationPresence(conversationId);
   // Seed the per-user read-state (unread/seen) mirror from the conversation
   // list, so the sidebar dots reflect what the user did on any device.
   // `undefined` while the query is still loading (vs `[]` for a loaded-but-

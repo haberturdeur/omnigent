@@ -114,6 +114,7 @@ import {
   useRebasePath,
   useSearchParams,
 } from "@/lib/routing";
+import { ProfileSwitcher } from "./ProfileSwitcher";
 import { SidebarHeaderActions, SidebarSettingsButton } from "./SidebarHeaderActions";
 import omnigentWordmark from "@/assets/omnigent-wordmark.svg";
 import { Button } from "@/components/ui/button";
@@ -1180,6 +1181,7 @@ function SidebarImpl({
               />
             </div>
 
+            <ProfileSwitcher />
             <div className="flex flex-col gap-px px-2 pt-2 pb-0" data-testid="sidebar-primary-nav">
               {/* "New session" routes to the home composer ("/"), which now owns
             session creation end-to-end (host/workspace/worktree chips +

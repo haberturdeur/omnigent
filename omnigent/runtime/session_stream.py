@@ -47,6 +47,27 @@ from omnigent.runtime import disconnect_outcome, inflight_text, pending_elicitat
 
 _logger = logging.getLogger(__name__)
 
+_notification_sink: Callable[[str, dict[str, Any]], None] | None = None
+
+
+def configure_notification_sink(
+    sink: Callable[[str, dict[str, Any]], None] | None,
+) -> Callable[[], None]:
+    """Install a best-effort observer for server-side push notifications."""
+    global _notification_sink
+    with _lock:
+        previous = _notification_sink
+        _notification_sink = sink
+
+    def uninstall() -> None:
+        global _notification_sink
+        with _lock:
+            if _notification_sink is sink:
+                _notification_sink = previous
+
+    return uninstall
+
+
 # A generous burst allowance that still bounds one stalled subscriber's memory.
 _SUBSCRIBER_QUEUE_MAX_EVENTS = 1024
 
@@ -341,6 +362,12 @@ def publish(conversation_id: str, event: dict[str, Any]) -> int:
     # type is a single dict lookup and a return. A suppressed event is
     # always a text delta, never an elicitation, so this still runs.
     pending_elicitations.record_publish(conversation_id, event)
+    sink = _notification_sink
+    if sink is not None:
+        try:
+            sink(conversation_id, event)
+        except Exception:
+            _logger.exception("Could not persist session notification")
     if live_event is None:
         return 0
     with _lock:

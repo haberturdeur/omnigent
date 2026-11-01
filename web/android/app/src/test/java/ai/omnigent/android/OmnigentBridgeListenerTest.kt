@@ -15,6 +15,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
+import org.robolectric.annotation.Config
 import org.robolectric.shadows.ShadowNotificationManager
 
 /**
@@ -23,6 +24,7 @@ import org.robolectric.shadows.ShadowNotificationManager
  * service — the same wiring [MainActivity] installs.
  */
 @RunWith(RobolectricTestRunner::class)
+@Config(sdk = [35])
 class OmnigentBridgeListenerTest {
     private lateinit var context: Application
     private lateinit var listener: OmnigentBridgeListener
@@ -133,6 +135,19 @@ class OmnigentBridgeListenerTest {
         listener.handle("""{"method":"unknownThing","count":5}""")
         listener.handle("""{"count":5}""")
         assertEquals(0, shadow.allNotifications.size)
+    }
+
+    @Test
+    fun `notification settings dispatch through the pinned bridge`() {
+        var requests = 0
+        val wired =
+            OmnigentBridgeListener(
+                notifications = NativeNotificationManager(context),
+                blobSaver = BlobSaver(context),
+                onNotificationSettings = { requests++ },
+            )
+        wired.handle("""{"method":"openNotificationSettings"}""")
+        assertEquals(1, requests)
     }
 
     private fun serverSelectionListener(

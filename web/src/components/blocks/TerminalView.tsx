@@ -43,6 +43,7 @@ import {
   type TerminalInputListener,
   applyTerminalCopy,
   isUnexpectedTerminalClose,
+  TOUCH_SCROLL_SLOP_PX,
   resolveTerminalWorkspaceFileLink,
   TerminalSession,
   terminalTheme,
@@ -281,6 +282,7 @@ export function TerminalView({
   const isDarkRef = useRef(isDark);
   isDarkRef.current = isDark;
   const sessionRef = useRef<TerminalSession | null>(null);
+  const touchTap = useRef<{ id: number; x: number; y: number; started: number } | null>(null);
   // Stable refs so callback prop changes never recreate the WS session.
   const onStateChangeRef = useRef(onStateChange);
   onStateChangeRef.current = onStateChange;
@@ -792,7 +794,52 @@ export function TerminalView({
         className="relative min-h-0 flex-1 overflow-hidden p-3"
         style={{ backgroundColor: terminalBackground }}
       >
-        <div key={connectAttempt} ref={attachSession} className="h-full w-full overflow-hidden" />
+        <div
+          key={connectAttempt}
+          ref={attachSession}
+          className="h-full w-full overflow-hidden"
+          onTouchStart={(event) => {
+            const touch = event.touches[0];
+            touchTap.current =
+              active && !readOnly && state.kind === "connected" && event.touches.length === 1
+                ? { id: touch.identifier, x: touch.clientX, y: touch.clientY, started: Date.now() }
+                : null;
+          }}
+          onTouchMove={(event) => {
+            const tap = touchTap.current;
+            const touch = event.touches[0];
+            if (
+              tap &&
+              (event.touches.length !== 1 ||
+                touch.identifier !== tap.id ||
+                Math.hypot(touch.clientX - tap.x, touch.clientY - tap.y) >= TOUCH_SCROLL_SLOP_PX)
+            ) {
+              touchTap.current = null;
+            }
+          }}
+          onTouchCancel={() => {
+            touchTap.current = null;
+          }}
+          onTouchEnd={(event) => {
+            const tap = touchTap.current;
+            touchTap.current = null;
+            const touch = event.changedTouches[0];
+            if (
+              tap &&
+              touch &&
+              active &&
+              !readOnly &&
+              state.kind === "connected" &&
+              event.touches.length === 0 &&
+              touch.identifier === tap.id &&
+              Date.now() - tap.started < 500 &&
+              Math.hypot(touch.clientX - tap.x, touch.clientY - tap.y) < TOUCH_SCROLL_SLOP_PX
+            ) {
+              // Focus inside the user gesture so mobile WebViews may open the IME.
+              sessionRef.current?.focus(true);
+            }
+          }}
+        />
         {state.kind !== "connected" && (
           <StatusOverlay
             state={state}

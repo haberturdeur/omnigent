@@ -82,6 +82,8 @@ interface NativeShellApi {
    * ignore it.
    */
   setBadgeCount: (count: number, activation?: BadgeActivation) => void;
+  /** Withdraw notifications for a session the user is viewing. */
+  dismissSessionNotifications?: (sessionId: string) => void;
   /** Tell the shell which theme source the user selected. */
   setColorScheme?: (scheme: "light" | "dark" | "system") => void;
   /** Fire an OS notification; resolves true when it was shown. */
@@ -138,8 +140,11 @@ interface NativeShellApi {
   switchServer?: (url: string) => Promise<void>;
   /** Sign the window's server out. Absent on shells that predate it. */
   signOutOfServer?: () => Promise<boolean>;
+  /** Open server and app settings in Android shells that provide this action. */
+  openServerSettings?: () => void;
   /** Return to the shell's "connect to server" setup page. */
   openServerSetup?: () => void;
+  openNotificationSettings?: () => void;
   /**
    * Drive the native Chat/Terminal bar's visibility (iOS). The web app owns
    * the truth and only ever pushes it hidden now that the switcher lives in
@@ -688,6 +693,18 @@ export function applyMacElectronShellAttribute(): void {
 /** True when running inside the iOS WKWebView native shell. */
 export function isIOSShell(): boolean {
   return nativeApi()?.kind === "ios";
+}
+
+export function hasNativeServerSettings(): boolean {
+  return isAndroidShell() && typeof nativeApi()?.openServerSettings === "function";
+}
+
+export function openNativeServerSettings(): void {
+  try {
+    nativeApi()?.openServerSettings?.();
+  } catch (err) {
+    console.warn("[nativeBridge] native server settings failed:", err);
+  }
 }
 
 /**
@@ -1318,4 +1335,22 @@ export async function droppedFilePath(file: File): Promise<string | null> {
     console.warn("[nativeBridge] electron getPathForFile failed:", err);
     return null;
   }
+}
+
+export function dismissNativeSessionNotifications(sessionId: string): void {
+  const native = nativeApi();
+  if (!native?.dismissSessionNotifications) return;
+  try {
+    native.dismissSessionNotifications(sessionId);
+  } catch (err) {
+    console.warn("[nativeBridge] native notification dismissal failed:", err);
+  }
+}
+
+export function hasNativeNotificationSettings(): boolean {
+  return typeof nativeApi()?.openNotificationSettings === "function";
+}
+
+export function openNativeNotificationSettings(): void {
+  nativeApi()?.openNotificationSettings?.();
 }

@@ -17,7 +17,7 @@ from sqlalchemy.sql.dml import Insert
 
 from omnigent.db.account_authority import require_active_account
 from omnigent.db.compression import decode, encode
-from omnigent.db.db_models import SqlPreference, SqlProject, current_workspace_id
+from omnigent.db.db_models import SqlPreference, SqlProfile, SqlProject, current_workspace_id
 from omnigent.db.utils import (
     get_or_create_engine,
     make_named_managed_session_maker,
@@ -92,6 +92,7 @@ def _to_entity(row: SqlProject) -> Project:
         created_at=row.created_at,
         updated_at=row.updated_at,
         config=_decode_config(row.config),
+        profile_id=row.profile_id,
     )
 
 
@@ -178,6 +179,7 @@ class SqlAlchemyProjectStore(ProjectStore):
         user_id: str | None,
         name: str,
         exclude_id: str | None,
+        profile_id: str | None = None,
     ) -> bool:
         """Return whether ``user_id`` already has a project named ``name``.
 
@@ -196,6 +198,7 @@ class SqlAlchemyProjectStore(ProjectStore):
             SqlProject.workspace_id == current_workspace_id(),
             SqlProject.user_id == user_id,
             SqlProject.name == name,
+            SqlProject.profile_id == profile_id,
         )
         if exclude_id is not None:
             stmt = stmt.where(SqlProject.id != exclude_id)
@@ -207,6 +210,8 @@ class SqlAlchemyProjectStore(ProjectStore):
         name: str,
         user_id: str | None,
         config: dict[str, Any] | None = None,
+        *,
+        profile_id: str | None = None,
     ) -> Project:
         """Insert a new, empty project.
 
@@ -220,7 +225,21 @@ class SqlAlchemyProjectStore(ProjectStore):
 
         def write(session: Session) -> Project:
             require_active_account(session, user_id)
-            if self._name_taken(session, user_id=user_id, name=name, exclude_id=None):
+            if profile_id is not None:
+                profile_query = (
+                    select(SqlProfile)
+                    .where(
+                        SqlProfile.workspace_id == current_workspace_id(),
+                        SqlProfile.id == profile_id,
+                        SqlProfile.user_id == user_id,
+                    )
+                    .with_for_update()
+                )
+                if session.execute(profile_query).scalar_one_or_none() is None:
+                    raise OmnigentError("Profile not found", code=ErrorCode.NOT_FOUND)
+            if self._name_taken(
+                session, user_id=user_id, name=name, exclude_id=None, profile_id=profile_id
+            ):
                 raise OmnigentError(
                     f"A project named {name!r} already exists",
                     code=ErrorCode.ALREADY_EXISTS,
@@ -232,6 +251,7 @@ class SqlAlchemyProjectStore(ProjectStore):
                 created_at=created_at,
                 updated_at=None,
                 config=encoded_config,
+                profile_id=profile_id,
             )
             session.add(row)
             session.flush()
@@ -247,7 +267,7 @@ class SqlAlchemyProjectStore(ProjectStore):
                 return None
             return _to_entity(row)
 
-    def list(self, *, user_id: str | None) -> list[Project]:
+    def list(self, *, user_id: str | None, profile_id: str | None = None) -> list[Project]:
         """List the owner's projects ordered by ``created_at ASC, id ASC``."""
         with self._session("list_projects") as session:
             stmt = (
@@ -256,6 +276,8 @@ class SqlAlchemyProjectStore(ProjectStore):
                 .where(SqlProject.user_id == user_id)
                 .order_by(asc(SqlProject.created_at), asc(SqlProject.id))
             )
+            if profile_id is not None:
+                stmt = stmt.where(SqlProject.profile_id == profile_id)
             rows = session.execute(stmt).scalars().all()
             return [_to_entity(r) for r in rows]
 
@@ -287,7 +309,13 @@ class SqlAlchemyProjectStore(ProjectStore):
                 return None
             changed = False
             if name is not None and row.name != name:
-                if self._name_taken(session, user_id=user_id, name=name, exclude_id=project_id):
+                if self._name_taken(
+                    session,
+                    user_id=user_id,
+                    name=name,
+                    exclude_id=project_id,
+                    profile_id=row.profile_id,
+                ):
                     raise OmnigentError(
                         f"A project named {name!r} already exists",
                         code=ErrorCode.ALREADY_EXISTS,

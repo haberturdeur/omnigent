@@ -12,6 +12,8 @@ import {
 } from "@/components/ui/dropdown-menu";
 import {
   getServerPicker,
+  hasNativeNotificationSettings,
+  openNativeNotificationSettings,
   openServerSetup,
   signOutOfServer,
   switchServer,
@@ -263,6 +265,11 @@ export function SidebarServerPicker() {
               ))}
             </>
           ) : null}
+          {hasNativeNotificationSettings() && (
+            <DropdownMenuItem onSelect={openNativeNotificationSettings}>
+              Android notifications…
+            </DropdownMenuItem>
+          )}
           <DropdownMenuSeparator />
           <DropdownMenuItem className="gap-2" onSelect={() => openServerSetup()}>
             <PlusIcon className="size-4 shrink-0" />

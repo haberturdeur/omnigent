@@ -312,6 +312,7 @@ def _to_conversation(
         pending_elicitation_count=meta.pending_elicitation_count if meta else None,
         runner_last_seen=meta.runner_last_seen if meta else None,
         project_id=meta.project_id if meta else None,
+        profile_id=meta.profile_id if meta else None,
     )
 
 
@@ -384,6 +385,7 @@ def _new_session_metadata_row(
     workspace: str | None = None,
     terminal_launch_args: list[str] | None = None,
     project_id: str | None = None,
+    profile_id: str | None = None,
     host_id: str | None = None,
     inference_snapshot: str | None = None,
 ) -> SqlConversationMetadata:
@@ -411,6 +413,7 @@ def _new_session_metadata_row(
         kind=encode_conversation_kind("sub_agent" if parent_conversation_id else "default"),
         runner_id=runner_id,
         project_id=project_id,
+        profile_id=profile_id,
         host_id=host_id,
         inference_snapshot=inference_snapshot,
         workspace=workspace,
@@ -1038,6 +1041,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         terminal_launch_args: list[str] | None = None,
         conversation_id: str | None = None,
         project_id: str | None = None,
+        profile_id: str | None = None,
         inference_snapshot: dict[str, Any] | None = None,
         labels: dict[str, str] | None = None,
         reasoning_effort: str | None = None,
@@ -1109,6 +1113,9 @@ class SqlAlchemyConversationStore(ConversationStore):
             NameAlreadyExistsError,
         )
 
+        if profile_id is None and parent_conversation_id:
+            parent_metadata = self._get_meta(parent_conversation_id)
+            profile_id = parent_metadata.profile_id if parent_metadata else None
         now = now_epoch()
         new_id = conversation_id if conversation_id is not None else generate_conversation_id()
         encoded_kind = encode_conversation_kind(kind)
@@ -1212,6 +1219,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                     terminal_launch_args=encoded_terminal_launch_args,
                     inference_snapshot=encoded_inference_snapshot,
                     project_id=project_id,
+                    profile_id=profile_id,
                 )
                 meta_sess.add(meta)
                 return meta
@@ -2842,6 +2850,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         self,
         accessible_by: str | None = None,
         owned_by: str | None = None,
+        profile_id: str | None = None,
     ) -> list[str]:
         """
         Return all distinct project names, ordered alphabetically.
@@ -2950,6 +2959,17 @@ class SqlAlchemyConversationStore(ConversationStore):
                         )
                         .exists()
                     )
+            if profile_id is not None:
+                profile_query = select(SqlConversationMetadata.id).where(
+                    SqlConversationMetadata.workspace_id == current_workspace_id(),
+                    SqlConversationMetadata.profile_id == profile_id,
+                )
+                if self._conv_engine is self._engine:
+                    stmt = stmt.where(SqlConversationLabel.conversation_id.in_(profile_query))
+                else:
+                    with self._session("list_profile_project_members") as metadata_session:
+                        profile_ids = list(metadata_session.execute(profile_query).scalars())
+                    stmt = stmt.where(SqlConversationLabel.conversation_id.in_(profile_ids))
             return [row[0] for row in ap_sess.execute(stmt).all()]
 
     def delete_label(
@@ -3002,6 +3022,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         pinned: bool = False,
         pinned_owner: str | None = None,
         title: str | None = None,
+        profile_id: str | None = None,
     ) -> PagedList[Conversation]:
         """
         List conversations with cursor-based pagination.
@@ -3180,6 +3201,31 @@ class SqlAlchemyConversationStore(ConversationStore):
 
             if qualifying_ids is not None:
                 stmt = stmt.where(SqlConversation.id.in_(qualifying_ids))
+            if profile_id is not None and not shared_only:
+                profile_match = SqlConversationMetadata.profile_id == profile_id
+                if accessible_by is not None and owned_by is None:
+                    owned = (
+                        select(SqlSessionPermission.conversation_id)
+                        .where(
+                            SqlSessionPermission.workspace_id
+                            == SqlConversationMetadata.workspace_id,
+                            SqlSessionPermission.conversation_id == SqlConversationMetadata.id,
+                            SqlSessionPermission.user_id == accessible_by,
+                            SqlSessionPermission.level >= LEVEL_OWNER,
+                        )
+                        .exists()
+                    )
+                    profile_match = or_(profile_match, ~owned)
+                profile_query = select(SqlConversationMetadata.id).where(
+                    SqlConversationMetadata.workspace_id == current_workspace_id(),
+                    profile_match,
+                )
+                if self._conv_engine is self._engine:
+                    stmt = stmt.where(SqlConversation.id.in_(profile_query))
+                else:
+                    with self._session("list_profile_session_ids") as metadata_session:
+                        profile_ids = list(metadata_session.execute(profile_query).scalars())
+                    stmt = stmt.where(SqlConversation.id.in_(profile_ids))
 
             if acl_pushdown:
                 # Correlated on both PK members so Postgres can drive the
@@ -4921,6 +4967,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         parent_conversation_id: str | None = None,
         runner_id: str | None = None,
         project_id: str | None = None,
+        profile_id: str | None = None,
         host_id: str | None = None,
         inference_snapshot: dict[str, Any] | None = None,
         created_by: str | None = None,
@@ -4996,6 +5043,7 @@ class SqlAlchemyConversationStore(ConversationStore):
             parent_conversation_id=parent_conversation_id,
             runner_id=runner_id,
             project_id=project_id,
+            profile_id=profile_id,
             host_id=host_id,
             inference_snapshot=inference_snapshot,
             created_by=created_by,
@@ -5018,6 +5066,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         parent_conversation_id: str | None = None,
         runner_id: str | None = None,
         project_id: str | None = None,
+        profile_id: str | None = None,
         host_id: str | None = None,
         inference_snapshot: dict[str, Any] | None = None,
         created_by: str | None = None,
@@ -5097,6 +5146,7 @@ class SqlAlchemyConversationStore(ConversationStore):
                 parent_conversation_id=parent_conversation_id,
                 runner_id=runner_id,
                 project_id=project_id,
+                profile_id=profile_id,
                 workspace=workspace,
                 terminal_launch_args=terminal_launch_args,
                 host_id=host_id,
@@ -5765,6 +5815,7 @@ class SqlAlchemyConversationStore(ConversationStore):
             fork_meta = SqlConversationMetadata(
                 id=new_conv_id,
                 kind=encoded_default_kind,
+                profile_id=source_meta_ref.profile_id if source_meta_ref else None,
                 terminal_launch_args=source_terminal_args,
                 inference_snapshot=(
                     source_meta_ref.inference_snapshot if source_meta_ref else None

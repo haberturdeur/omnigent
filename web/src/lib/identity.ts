@@ -15,6 +15,7 @@
  * into a login redirect.
  */
 
+import { activeProfileId } from "./activeProfile";
 import { stripBasePath, withBasePath } from "./basePath";
 import { getCachedServerInfo } from "./capabilities";
 import {
@@ -558,6 +559,7 @@ export async function authenticatedFetch(
   init?: RequestInit,
 ): Promise<Response> {
   const headers = new Headers(init?.headers);
+  headers.set("X-Omnigent-Profile", activeProfileId());
   if (currentUserId && currentUserId !== RESERVED_USER_LOCAL && !headers.has("X-Forwarded-Email")) {
     headers.set("X-Forwarded-Email", currentUserId);
   }

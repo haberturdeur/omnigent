@@ -71,8 +71,8 @@ export interface ProjectPrefillState {
   agentSeeded: boolean;
 }
 
-export function initialPrefillState(project: string): ProjectPrefillState {
-  const plain = project === "";
+export function initialPrefillState(project: string, seedEmpty = false): ProjectPrefillState {
+  const plain = project === "" && !seedEmpty;
   return {
     project,
     phase: plain ? "settled" : "location",

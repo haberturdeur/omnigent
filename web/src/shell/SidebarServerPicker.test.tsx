@@ -14,6 +14,8 @@ const signOutOfServer = vi.fn();
 
 vi.mock("@/lib/nativeBridge", () => ({
   getServerPicker: () => getServerPicker(),
+  hasNativeNotificationSettings: () => false,
+  openNativeNotificationSettings: vi.fn(),
   switchServer: (url: string) => switchServer(url),
   openServerSetup: () => openServerSetup(),
   signOutOfServer: () => signOutOfServer(),

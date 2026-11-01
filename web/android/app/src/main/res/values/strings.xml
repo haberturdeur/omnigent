@@ -43,4 +43,36 @@
     <!-- Shown to IT admins in their EMM console, not to app users. -->
     <string name="restriction_server_urls_title">Omnigent server URLs</string>
     <string name="restriction_server_urls_description">Server URLs to offer users, separated by commas or new lines, most preferred first. They are listed in the app for the user to pick from; the app does not connect to one automatically, and users can still enter a different server.</string>
+    <string name="notification_session">Omnigent session</string>
+    <string name="notification_needs_input">Agent is asking for your input.</string>
+    <string name="notification_completed">Agent finished and is ready for your input.</string>
+    <string name="notification_failed">Agent stopped with an error.</string>
+    <string name="monitor_channel_name">Background monitoring</string>
+    <string name="monitor_channel_description">Keeps self-hosted session notifications active without a vendor push service.</string>
+    <string name="monitor_notification_title">Omnigent session monitor</string>
+    <string name="monitor_status_active">Watching for session updates</string>
+    <string name="monitor_status_sign_in">Open Omnigent to sign in again</string>
+    <string name="monitor_status_unreachable">Server unavailable; retrying</string>
+    <string name="monitor_stop">Stop</string>
+    <string name="server_settings_title">Server and app settings</string>
+    <string name="connected_server_label">Connected server</string>
+    <string name="close">Close</string>
+    <string name="menu_enable_push">Enable UnifiedPush</string>
+    <string name="menu_disable_push">Disable UnifiedPush</string>
+    <string name="push_server_unavailable">Could not register notifications. Open Omnigent and make sure you are signed in.</string>
+    <string name="push_distributor_unavailable">Install or configure a UnifiedPush distributor first.</string>
+    <string name="push_registration_failed">UnifiedPush registration failed. Check your distributor and try again.</string>
+    <string name="push_webpush_required">This distributor did not provide encrypted Web Push keys.</string>
+    <string name="approval_action_approve">Approve</string>
+    <string name="approval_action_always">Always allow</string>
+    <string name="approval_action_reject">Reject</string>
+    <string name="menu_enable_monitor">Enable Polling Fallback</string>
+    <string name="menu_disable_monitor">Disable Polling Fallback</string>
+    <string name="menu_enable_private_keyboard">Enable Private Keyboard</string>
+    <string name="menu_disable_private_keyboard">Disable Private Keyboard</string>
+    <string name="download_channel_name">Downloads</string>
+    <string name="download_in_progress">Downloading…</string>
+    <string name="download_started">Downloading %1$s</string>
+    <string name="download_complete">Download complete</string>
+    <string name="download_failed">Download failed</string>
 </resources>

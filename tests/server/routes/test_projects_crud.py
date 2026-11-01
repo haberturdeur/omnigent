@@ -610,3 +610,55 @@ async def test_order_endpoints_enforce_owner_and_announce_changes(
         assert alice_events == [{"type": "projects_changed"}] * 2
         await asyncio.sleep(0.05)
         assert bob_events == []
+
+
+async def test_profiles_scope_projects_and_validate_ownership(
+    multi_user_client: httpx.AsyncClient,
+) -> None:
+    alice = _as_user(ALICE)
+    bob = _as_user(BOB)
+    response = await multi_user_client.post("/v1/profiles", headers=alice, json={"name": "Work"})
+    assert response.status_code == 200
+    work = response.json()["id"]
+    response = await multi_user_client.post(
+        "/v1/projects", headers={**alice, "X-Omnigent-Profile": work}, json={"name": "Shared name"}
+    )
+    assert response.status_code == 200
+    assert response.json()["profile_id"] == work
+    personal = await multi_user_client.post(
+        "/v1/projects", headers=alice, json={"name": "Shared name"}
+    )
+    assert personal.status_code == 200
+    assert personal.json()["profile_id"] != work
+    selected = await multi_user_client.get(
+        "/v1/projects", headers={**alice, "X-Omnigent-Profile": work}
+    )
+    assert [row["id"] for row in selected.json()["data"]] == [response.json()["id"]]
+    denied = await multi_user_client.get(
+        "/v1/projects", headers={**bob, "X-Omnigent-Profile": work}
+    )
+    assert denied.status_code == 404
+    protected = await multi_user_client.post(
+        "/v1/profiles", headers=alice, json={"name": "Secret", "protection": {"lock": "passcode"}}
+    )
+    assert protected.status_code == 422
+    deletion = await multi_user_client.delete(f"/v1/profiles/{work}", headers=alice)
+    assert deletion.status_code == 409
+
+
+async def test_profile_session_filter_precedes_pagination(
+    project_client: httpx.AsyncClient, db_uri: str
+) -> None:
+    response = await project_client.post("/v1/profiles", json={"name": "Work"})
+    work = response.json()["id"]
+    response = await project_client.get("/v1/profiles")
+    personal = next(row["id"] for row in response.json()["data"] if row["is_default"])
+    store = SqlAlchemyConversationStore(db_uri)
+    mine = store.create_conversation(agent_id="a" * 32, profile_id=work, title="Work session")
+    store.create_conversation(agent_id="a" * 32, profile_id=personal, title="Personal session")
+    response = await project_client.get("/v1/sessions", params={"profile_id": work, "limit": 1})
+    assert response.status_code == 200, response.text
+    assert [row["id"] for row in response.json()["data"]] == [mine.id]
+    assert response.json()["data"][0]["profile_id"] == work
+    invalid = await project_client.get("/v1/sessions", params={"profile_id": "not-a-profile"})
+    assert invalid.status_code == 404

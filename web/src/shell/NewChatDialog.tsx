@@ -1,3 +1,4 @@
+import { useProfiles } from "@/lib/profilesApi";
 import { useLoadedConversations } from "@/hooks/useSidebarData";
 import { useComposerContext } from "@/hooks/useComposerContext";
 import { useSlashCompletion } from "@/hooks/useSlashCompletion";
@@ -2154,13 +2155,15 @@ export function NewChatLandingScreen() {
   // waits so a generic default can't win the race); `{}` = nothing to wait for
   // (plain visit / label-only folder / genuinely empty config), so it settles
   // immediately and the generic defaults take over.
+  const { activeProfile, isLoading: profileLoading } = useProfiles();
   const prefillConfig = useMemo<ProjectPrefillConfig | undefined>(() => {
+    if (profileLoading) return undefined;
     // A project-scoped visit must resolve name → id via the projects list
     // before we know whether there's a config to read — until it loads, the id
     // is falsely null, so wait rather than settle prematurely.
     if (projectParam !== "" && projectListLoading) return undefined;
     if (configProjectId !== null && projectConfigLoading) return undefined;
-    const c = storedProjectConfig;
+    const c = { ...activeProfile?.config, ...storedProjectConfig };
     const stored: ProjectPrefillConfig = c
       ? {
           hostId: c.host_id,
@@ -2178,6 +2181,8 @@ export function NewChatLandingScreen() {
     configProjectId,
     projectConfigLoading,
     storedProjectConfig,
+    activeProfile,
+    profileLoading,
     projectLaunch,
   ]);
 
@@ -2767,7 +2772,7 @@ export function NewChatLandingScreen() {
   // host/workspace defaults below hold off until it settles so they can't win
   // the race against the project's stored values.
   const [prefill, setPrefill] = useState<ProjectPrefillState>(() =>
-    initialPrefillState(projectParam),
+    initialPrefillState(projectParam, true),
   );
   // The generic defaults gate on the location track only — the agent seed
   // waits on its own fetch and must not hold up the host/workspace fill.
@@ -2823,7 +2828,7 @@ export function NewChatLandingScreen() {
     setPickerEdits(null);
     pickedOptionKeysRef.current.clear();
     seededConfigSigRef.current = prefillConfigSig;
-    setPrefill(initialPrefillState(projectParam));
+    setPrefill(initialPrefillState(projectParam, true));
   }, [projectParam, prefill.project, prefillConfigSig]);
 
   // Record the config the machine settled from, once it's loaded and the

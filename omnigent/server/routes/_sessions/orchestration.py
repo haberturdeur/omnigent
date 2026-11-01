@@ -391,6 +391,7 @@ from omnigent.server.schemas import (
     SessionStatusEvent,
     SessionUsageEvent,
 )
+from omnigent.server.session_profiles import resolve_session_profile
 from omnigent.server.startup_inputs import (
     STARTUP_LABEL,
     StartupInputContext,
@@ -1306,6 +1307,7 @@ def _build_session_list_item(
         search_snippet=conv.search_snippet,
         parent_session_id=conv.parent_conversation_id,
         project_id=conv.project_id,
+        profile_id=conv.profile_id,
         pull_request=pull_request,
         pull_requests_synced=pull_requests_synced,
     )
@@ -1597,6 +1599,7 @@ def _build_session_response(
         # sessions whose forwarder stamps a turn id; ``None`` otherwise.
         active_response_id=_session_active_response_cache.get(conv.id),
         project_id=conv.project_id,
+        profile_id=conv.profile_id,
     )
 
 
@@ -12144,6 +12147,9 @@ async def _create_session_from_existing_agent(
                 git_branch=git_branch,
                 terminal_launch_args=validated_launch_args,
                 project_id=project_resolution.project_id,
+                profile_id=await resolve_session_profile(
+                    request, body, conversation_store, project_store
+                ),
                 labels=initial_labels or None,
                 model_override=model_override,
                 reasoning_effort=reasoning_effort,

@@ -29,6 +29,7 @@ class OmnigentBridgeListener(
     private val onSwitchServer: (String) -> Unit = {},
     /** Web asked to open the shell's "connect to server" setup page. */
     private val onOpenServerSetup: () -> Unit = {},
+    private val onNotificationSettings: () -> Unit = {},
     /** Present only for a natively authenticated workspace bridge. */
     private val onSignOut: (() -> Unit)? = null,
     /** Web asked to sign the server out; the shell answers whether it took over. */
@@ -78,6 +79,11 @@ class OmnigentBridgeListener(
                 }
             }
 
+            "dismissSessionNotifications" -> {
+                val sessionId = json.optString("sessionId").takeIf { it.isNotBlank() } ?: return
+                notifications.dismissSessionNotification(sessionId, null)
+            }
+
             "setBadgeCount" -> {
                 notifications.setBadgeCount(
                     count = json.optInt("count", 0),
@@ -112,6 +118,10 @@ class OmnigentBridgeListener(
 
             "switchServer" -> {
                 onSwitchServer(json.optString("url").ifEmpty { return })
+            }
+
+            "openNotificationSettings" -> {
+                onNotificationSettings()
             }
 
             "openServerSetup" -> {

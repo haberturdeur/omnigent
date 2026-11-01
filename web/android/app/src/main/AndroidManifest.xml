@@ -15,6 +15,15 @@
       otherwise copy a live session (and the saved server list) off-device. A
       server URL is trivially re-entered; a session is not worth exfiltrating.
     -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+
+
+
     <application
         android:allowBackup="false"
         android:enableOnBackInvokedCallback="true"
@@ -81,6 +90,30 @@
             android:name=".ConnectActivity"
             android:exported="false"
             android:windowSoftInputMode="adjustResize" />
+    <activity android:name=".NotificationRouterActivity" android:exported="false" android:noHistory="true" />
+
+
+    <service android:name=".SessionMonitorService" android:exported="false" android:foregroundServiceType="specialUse">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="User-enabled monitoring of self-hosted Omnigent sessions" />
+        </service>
+
+
+    <service android:name=".OmnigentPushService" android:exported="true">
+            <intent-filter>
+                <action android:name="org.unifiedpush.android.connector.PUSH_EVENT" />
+            </intent-filter>
+        </service>
+
+
+    <receiver android:name=".ApprovalActionReceiver" android:exported="false" />
+
+
+    <receiver android:name=".SessionMonitorBootReceiver" android:enabled="true" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
     </application>
 
 </manifest>

@@ -638,6 +638,25 @@ See the [policy guide](https://github.com/omnigent-ai/omnigent/blob/main/docs/PO
 
 ---
 
+## Profiles
+
+Use the sidebar's **Profile** selector to separate your projects and sessions.
+Create a profile with **+**, set its default working directory, host, and agent,
+and use **Open profile in new tab** to keep independent contexts open. Project
+settings override profile defaults. **Delete empty profile** removes an unused
+profile; the Personal default and profiles containing projects or sessions cannot
+be deleted. Profiles organize work and do not restrict filesystem access.
+
+This branch preserves the earlier fork's profile, project, session, and push
+registration data through its migration history. Existing protected profiles
+must first be converted to ordinary profiles in the old application; the upgrade
+refuses an implicit conversion. Back up the database before upgrading. This
+branch provides no passcode, biometric, or protected-root controls.
+
+To verify the UI, create a Work profile, create a project there, switch to
+Personal and confirm that project disappears, then open Work in a second tab.
+Switching either tab should leave the other tab's selected profile unchanged.
+
 ## Write your own agent
 
 For centrally managed remote tools, reusable account connections, and a gateway

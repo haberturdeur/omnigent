@@ -1,9 +1,16 @@
-import { PanelLeftOpenIcon, PanelRightOpenIcon, SearchIcon, SettingsIcon } from "lucide-react";
+import {
+  PanelLeftOpenIcon,
+  PanelRightOpenIcon,
+  SearchIcon,
+  ServerIcon,
+  SettingsIcon,
+} from "lucide-react";
 
 import { ALT_KEY, ARIA_MOD_KEY, MOD_KEY } from "@/components/KeyboardShortcut";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Link } from "@/lib/routing";
+import { hasNativeServerSettings, openNativeServerSettings } from "@/lib/nativeBridge";
 import { cn } from "@/lib/utils";
 
 const SIDEBAR_TOGGLE_KEYS = [MOD_KEY, ALT_KEY, "["] as const;
@@ -63,6 +70,24 @@ export function SidebarHeaderActions({
   return (
     <div className="flex items-center gap-1" data-testid="sidebar-header-actions">
       <SidebarSearchButton onOpenSearch={onOpenSearch} />
+      {hasNativeServerSettings() && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              aria-label="Server and app settings"
+              onClick={openNativeServerSettings}
+              className="size-6 text-muted-foreground hover:text-foreground"
+              data-testid="android-server-settings-button"
+            >
+              <ServerIcon className="ui-icon" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom">Server and app settings</TooltipContent>
+        </Tooltip>
+      )}
       <SidebarSettingsButton onSettingsClick={onSettingsClick} className="max-md:hidden" />
       <Tooltip>
         <TooltipTrigger asChild>

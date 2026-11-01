@@ -143,13 +143,22 @@ class MainActivity : AppCompatActivity() {
     private var pendingMicRequest: PermissionRequest? = null
     private var httpErrorRecoveryStarted = false
 
+    private var startMonitorAfterPermission = false
+    private var enablePushAfterPermission = false
+
     private val requestNotifications =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             // Denied: notify() no-ops when notifications are disabled and the
             // web layer keeps working without OS toasts. Granted: replay the
             // badge the web layer may have computed (and deduped) while the
             // permission dialog was still open — its post was silently dropped.
-            if (granted) notifications.replayBadge()
+            if (granted) {
+                notifications.replayBadge()
+                if (startMonitorAfterPermission) enablePollingFallback()
+                if (enablePushAfterPermission) enableUnifiedPush()
+            }
+            startMonitorAfterPermission = false
+            enablePushAfterPermission = false
         }
 
     private val requestMic =
@@ -879,7 +888,7 @@ class MainActivity : AppCompatActivity() {
             null,
         )
         if (!handled) return
-        if (workspaceSession != null) requestWorkspaceSignOut() else oidcSession?.signOut()
+        if (workspaceSession != null) requestWorkspaceSignOut() else signOutWithNotifications()
     }
 
     /** "Connect to new server…" from the sidebar picker — manual URL entry. */
@@ -1089,6 +1098,10 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        SessionMonitorStore.appVisible = true
+        if (SessionMonitorStore(this).enabled && !PushRegistrationManager(this).registered) {
+            runCatching { SessionMonitorService.startPreservingPreference(this) }
+        }
         oidcSession?.onForeground()
         val session = workspaceSession ?: return
         val profile = workspaceProfile ?: return
@@ -1102,6 +1115,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onStop() {
+        SessionMonitorStore.appVisible = false
         oidcSession?.onBackground()
         super.onStop()
     }
@@ -1138,6 +1152,7 @@ class MainActivity : AppCompatActivity() {
                     onServerPickerRequested = ::onServerPickerRequested,
                     onSwitchServer = ::onSwitchServerRequested,
                     onOpenServerSetup = ::onOpenServerSetupRequested,
+                    onNotificationSettings = { showServerSwitcherMenu(webView) },
                     onSignOut = if (workspaceSession != null) ::requestWorkspaceSignOut else null,
                     onSignOutOfServer = ::onSignOutOfServerRequested,
                 ),
@@ -1463,6 +1478,34 @@ class MainActivity : AppCompatActivity() {
             // Group 2: actions (divider before this group).
             add(2, 3, 0, getString(R.string.menu_reload))
             add(2, 4, 0, getString(R.string.menu_connect_new))
+            if (workspaceContext == null) {
+                add(
+                    2,
+                    7,
+                    0,
+                    if (PushRegistrationManager(
+                            this@MainActivity,
+                        ).enabled
+                    ) {
+                        "Disable UnifiedPush"
+                    } else {
+                        "Enable UnifiedPush"
+                    },
+                )
+                add(
+                    2,
+                    8,
+                    0,
+                    if (SessionMonitorStore(
+                            this@MainActivity,
+                        ).enabled
+                    ) {
+                        "Disable Polling Fallback"
+                    } else {
+                        "Enable Polling Fallback"
+                    },
+                )
+            }
             if (workspaceSession != null) {
                 add(2, 5, 0, getString(R.string.menu_sign_out_workspace))
                 DatabricksAuthDebugMenu.addItems(this)
@@ -1473,6 +1516,16 @@ class MainActivity : AppCompatActivity() {
         }
         popup.setOnMenuItemClickListener { item ->
             when (item.itemId) {
+                7 -> {
+                    toggleUnifiedPush()
+                    true
+                }
+
+                8 -> {
+                    toggleSessionMonitor()
+                    true
+                }
+
                 3 -> {
                     webView.reload()
                     true
@@ -1489,7 +1542,7 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 6 -> {
-                    oidcSession?.signOut()
+                    signOutWithNotifications()
                     true
                 }
 
@@ -1572,6 +1625,9 @@ class MainActivity : AppCompatActivity() {
         }
         loginAttempts = 0 // reached a pinned-origin page — we're past the login redirect
         oidcSession?.onPageVisited(url)
+        if (workspaceContext == null && PushRegistrationManager(this).enabled) {
+            PushRegistrationManager(this).uploadStoredEndpoint()
+        }
         // Does NOT reset the crash budget: a load-then-crash loop fires onPageReady
         // every cycle, so resetting here would defeat withinCrashBudget()'s guard.
         flushPendingActivation()
@@ -1640,6 +1696,53 @@ class MainActivity : AppCompatActivity() {
 
     private fun hasPermission(permission: String): Boolean =
         ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
+
+    private fun canPostNotifications(): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            hasPermission(Manifest.permission.POST_NOTIFICATIONS)
+
+    private fun signOutWithNotifications() {
+        PushRegistrationManager(this).disable()
+        SessionMonitorService.stop(this)
+        oidcSession?.signOut()
+    }
+
+    private fun toggleSessionMonitor() {
+        if (SessionMonitorStore(this).enabled) {
+            SessionMonitorService.stop(this)
+            return
+        }
+        if (canPostNotifications()) {
+            enablePollingFallback()
+        } else {
+            startMonitorAfterPermission = true
+            ensureNotificationPermission()
+        }
+    }
+
+    private fun toggleUnifiedPush() {
+        val registration = PushRegistrationManager(this)
+        if (registration.enabled) {
+            registration.disable()
+            return
+        }
+        if (canPostNotifications()) {
+            enableUnifiedPush()
+        } else {
+            enablePushAfterPermission = true
+            ensureNotificationPermission()
+        }
+    }
+
+    private fun enableUnifiedPush() {
+        PushRegistrationManager(this).enable(this)
+    }
+
+    private fun enablePollingFallback() {
+        val registration = PushRegistrationManager(this)
+        if (registration.enabled) registration.disable()
+        SessionMonitorService.start(this)
+    }
 
     private fun ensureNotificationPermission() {
         // Notification permission is granted at install time below API 33.
