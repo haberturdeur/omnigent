@@ -319,13 +319,8 @@ _SHELL_TOOL_NAMES = frozenset({"shell", "run", "runterminalcmd", "terminal", "ba
 # answered by driving the TUI picker rather than a single y/Escape keystroke.
 _QUESTION_TOOL_NAMES = frozenset({"askquestion"})
 
-# Short settle before surfacing a pending call. The auto-approve flash is now
-# excluded *structurally* (see read_cursor_pending_tool_calls: a committed call
-# appears without the marker), so this is only a small backstop for the sub-poll
-# race where cursor's marker frame is observed a tick before its committed frame.
-# Kept short so a genuinely-gated prompt that resolves quickly (e.g. an
-# Auto-review retry) still surfaces a card rather than being suppressed.
-_ELICITATION_SETTLE_S = 0.5
+# Allow transient native auto-approvals to clear before publishing a phone alert.
+_ELICITATION_SETTLE_S = 1.0
 
 # Give visible gates time to render and handle keystrokes under load. Pending
 # checkpoint markers alone do not mean that Cursor is awaiting approval.
@@ -935,7 +930,7 @@ async def supervise_cursor_transcript_elicitations(
                             session_id,
                             call.tool_call_id.splitlines()[0],
                         )
-                    if now - first < settle_s:
+                    if not _is_question_call(call) and now - first < settle_s:
                         continue
                     # Yolo / force: try to accept tool gates in-pane rather than
                     # mirroring a card a piloted parent cannot click. AskQuestion

@@ -1217,3 +1217,67 @@ class _FakeAsyncCM:
 
     async def __aexit__(self, *_exc: object) -> bool:
         return False
+
+
+@pytest.mark.parametrize(
+    "tool_name,transient,expected",
+    [("Write", True, []), ("Write", False, [1.2]), ("AskQuestion", True, [0.0])],
+)
+async def test_default_settle_suppresses_transient_approval_notifications(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    tool_name: str,
+    transient: bool,
+    expected: list[float],
+) -> None:
+    from types import SimpleNamespace
+
+    now = 0.0
+    posted_at = []
+    store = tmp_path / "store.db"
+    store.touch()
+    monkeypatch.setattr(cnp, "_discover_store", lambda *_: store)
+    monkeypatch.setattr(
+        cnp,
+        "read_cursor_pending_tool_calls",
+        lambda _: (
+            []
+            if transient and now >= 0.9
+            else [CursorPendingToolCall(tool_call_id="auto", tool_name=tool_name, args={})]
+        ),
+    )
+
+    async def park(*args, **kwargs):
+        posted_at.append(round(now, 1))
+
+    async def advance(_):
+        nonlocal now
+        await asyncio.sleep(0)
+        now = round(now + 0.3, 1)
+        if now >= 1.5:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(
+        cnp,
+        "asyncio",
+        SimpleNamespace(
+            **{
+                **vars(asyncio),
+                "sleep": advance,
+                "get_running_loop": lambda: SimpleNamespace(time=lambda: now),
+            }
+        ),
+    )
+    monkeypatch.setattr(cnp, "_run_one_approval", park)
+    monkeypatch.setattr(cnp, "_run_one_question", park)
+    monkeypatch.setattr(cnp.httpx, "AsyncClient", lambda **_: _FakeAsyncCM(object()))
+    with pytest.raises(asyncio.CancelledError):
+        await cnp.supervise_cursor_transcript_elicitations(
+            base_url="http://test",
+            headers={},
+            session_id="session",
+            bridge_dir=tmp_path,
+            workspace="/work",
+            launch_epoch_ms=0,
+        )
+    assert posted_at == expected
