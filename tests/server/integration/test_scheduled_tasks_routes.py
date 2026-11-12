@@ -35,6 +35,7 @@ from omnigent.stores.artifact_store.local import LocalArtifactStore
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from omnigent.stores.file_store.sqlalchemy_store import SqlAlchemyFileStore
 from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
+from omnigent.stores.profile_store.sqlalchemy_store import SqlAlchemyProfileStore
 from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
 from omnigent.stores.scheduled_task_store.sqlalchemy_store import (
     SqlAlchemyScheduledTaskStore,
@@ -2694,3 +2695,56 @@ async def test_changing_where_a_task_runs_starts_a_new_session(
 
     assert moved.status_code == 200, moved.text
     assert (moved.json()["session_mode"], moved.json()["session_id"]) == ("continue", None)
+
+
+async def test_profile_create_update_and_ownership(
+    auth_client: httpx.AsyncClient, db_uri: str
+) -> None:
+    _make_user(db_uri)
+    _make_user(db_uri, "bob@example.com")
+    profiles = SqlAlchemyProfileStore(db_uri)
+    alice = profiles.ensure_default(user_id="alice@example.com")
+    bob = profiles.ensure_default(user_id="bob@example.com")
+    response = await auth_client.post(
+        "/v1/scheduled-tasks",
+        json=_create_body(profile_id=alice.id, host_id=None, workspace=None),
+        headers=_headers(),
+    )
+    assert response.status_code == 200, response.text
+    task = response.json()
+    assert task["profile_id"] == alice.id
+    path = f"/v1/scheduled-tasks/{task['id']}"
+    denied = await auth_client.patch(path, json={"profile_id": bob.id}, headers=_headers())
+    assert denied.status_code == 404
+    got = await auth_client.get(path, headers=_headers())
+    assert got.json()["profile_id"] == alice.id
+    cleared = await auth_client.patch(path, json={"profile_id": None}, headers=_headers())
+    assert cleared.status_code == 200
+    assert cleared.json()["profile_id"] is None
+    denied_create = await auth_client.post(
+        "/v1/scheduled-tasks",
+        json=_create_body(profile_id=bob.id, host_id=None, workspace=None),
+        headers=_headers(),
+    )
+    assert denied_create.status_code == 404
+
+
+async def test_profile_change_starts_a_new_continued_session(auth_client, db_uri):
+    _make_user(db_uri)
+    profiles = SqlAlchemyProfileStore(db_uri)
+    profile = profiles.ensure_default(user_id="alice@example.com")
+    session_id = _owned_session(db_uri)
+    response = await auth_client.post(
+        "/v1/scheduled-tasks",
+        headers=_headers(),
+        json=_create_body(session_mode="continue", session_id=session_id),
+    )
+    assert response.status_code == 200, response.text
+    updated = await auth_client.patch(
+        f"/v1/scheduled-tasks/{response.json()['id']}",
+        headers=_headers(),
+        json={"profile_id": profile.id},
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["profile_id"] == profile.id
+    assert updated.json()["session_id"] is None

@@ -1798,6 +1798,7 @@ class SqlScheduledTask(OmnigentBase):
     user_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     # Relates to agents.id. No DB foreign key (Rule R032); cascade is app-owned.
     agent_id: Mapped[str] = mapped_column(Uuid16, nullable=False)
+    profile_id: Mapped[str | None] = mapped_column(Uuid16(), nullable=True)
     # Per-task overrides — None means fall back to the agent default. Widths
     # mirror the matching conversations.* override columns.
     model_override: Mapped[str | None] = mapped_column(String(128), nullable=True)

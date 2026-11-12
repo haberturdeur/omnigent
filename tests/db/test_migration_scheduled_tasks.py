@@ -97,6 +97,7 @@ def test_scheduled_tasks_columns(db_engine: Engine) -> None:
         "user_id",
         "agent_id",
         "account_generation",
+        "profile_id",
         "model_override",
         "reasoning_effort",
         "permission_mode",
@@ -924,4 +925,20 @@ def test_session_mode_migration_defaults_existing_tasks_and_round_trips(
             "status",
             "id",
         ],
+    }
+
+
+def test_scheduled_profile_migration_round_trip(db_engine: Engine) -> None:
+    config = _build_alembic_config(db_engine.url.render_as_string(hide_password=False))
+    with db_engine.begin() as conn:
+        config.attributes["connection"] = conn
+        command.downgrade(config, "pk1b2c3d4e5f")
+    assert "profile_id" not in {
+        c["name"] for c in sa.inspect(db_engine).get_columns("scheduled_tasks")
+    }
+    with db_engine.begin() as conn:
+        config.attributes["connection"] = conn
+        command.upgrade(config, "head")
+    assert "profile_id" in {
+        c["name"] for c in sa.inspect(db_engine).get_columns("scheduled_tasks")
     }

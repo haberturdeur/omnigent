@@ -42,6 +42,7 @@ export interface ScheduledTask {
   /** Owning user, or `null` in single-user / auth-disabled deployments. */
   ownerUserId: string | null;
   agentId: string;
+  profileId?: string | null;
   /** IANA timezone the RRULE is evaluated in, e.g. `America/Los_Angeles`. */
   timezone: string;
   createdAt: number;
@@ -123,6 +124,7 @@ export interface CreateScheduledTaskInput {
   prompt: string;
   rrule: string;
   agentId: string;
+  profileId?: string | null;
   timezone?: string;
   modelOverride?: string | null;
   reasoningEffort?: string | null;
@@ -160,6 +162,7 @@ export interface UpdateScheduledTaskInput {
    * is Claude-only) unless the same PATCH resends them.
    */
   agentId?: string;
+  profileId?: string | null;
   timezone?: string;
   modelOverride?: string | null;
   reasoningEffort?: string | null;
@@ -187,6 +190,7 @@ interface ScheduledTaskWire {
   rrule: string;
   owner_user_id: string | null;
   agent_id: string;
+  profile_id?: string | null;
   timezone: string;
   created_at: number;
   updated_at: number;
@@ -271,6 +275,7 @@ function taskFromWire(wire: ScheduledTaskWire): ScheduledTask {
     rrule: wire.rrule,
     ownerUserId: wire.owner_user_id,
     agentId: wire.agent_id,
+    profileId: wire.profile_id ?? null,
     timezone: wire.timezone,
     createdAt: wire.created_at,
     updatedAt: wire.updated_at,
@@ -341,6 +346,7 @@ export async function createScheduledTask(input: CreateScheduledTaskInput): Prom
     rrule: input.rrule,
     agent_id: input.agentId,
   };
+  if (input.profileId !== undefined) body.profile_id = input.profileId;
   if (input.timezone !== undefined) body.timezone = input.timezone;
   if (input.modelOverride != null) body.model_override = input.modelOverride;
   if (input.reasoningEffort != null) body.reasoning_effort = input.reasoningEffort;
@@ -372,6 +378,7 @@ export async function updateScheduledTask(
   if (input.prompt !== undefined) body.prompt = input.prompt;
   if (input.rrule !== undefined) body.rrule = input.rrule;
   if (input.agentId !== undefined) body.agent_id = input.agentId;
+  if (input.profileId !== undefined) body.profile_id = input.profileId;
   if (input.timezone !== undefined) body.timezone = input.timezone;
   if (input.modelOverride !== undefined) body.model_override = input.modelOverride;
   if (input.reasoningEffort !== undefined) body.reasoning_effort = input.reasoningEffort;

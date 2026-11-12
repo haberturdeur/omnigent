@@ -59,6 +59,7 @@ class _FakeConversation:
     live_status: str | None = None
     runner_last_seen: int | None = None
     parent_conversation_id: str | None = None
+    profile_id: str | None = None
     root_conversation_id: str = ""
 
     def __post_init__(self) -> None:
@@ -636,14 +637,17 @@ async def test_active_creates_session_grant_and_run() -> None:
 
 
 class FakeProjectStore:
-    def __init__(self, existing: set[tuple[str, str | None]]) -> None:
+    def __init__(
+        self, existing: set[tuple[str, str | None]], profile_id: str | None = None
+    ) -> None:
+        self.profile_id = profile_id
         self.existing = existing
         self.lookups: list[tuple[str, str | None]] = []
 
     def get(self, project_id: str, *, user_id: str | None) -> SimpleNamespace | None:
         self.lookups.append((project_id, user_id))
         found = (project_id, user_id) in self.existing
-        return SimpleNamespace(id=project_id) if found else None
+        return SimpleNamespace(id=project_id, profile_id=self.profile_id) if found else None
 
 
 @pytest.mark.asyncio
@@ -3060,3 +3064,62 @@ async def test_continue_dispatch_failure_records_a_failed_run() -> None:
     assert [(run["status"], run["error_code"], run["conversation_id"]) for run in store.runs] == [
         ("failed", "launch_failed", "conv_prev")
     ]
+
+
+@pytest.mark.asyncio
+async def test_session_uses_saved_profile() -> None:
+    deps = _deps(FakeScheduledTaskStore())
+    await fire_mod._create_session(deps, _task(profile_id="work"))
+    assert deps.conversation_store.created[0]["profile_id"] == "work"
+
+
+@pytest.mark.asyncio
+async def test_missing_profile_prevents_fire() -> None:
+    from unittest.mock import Mock
+
+    deps = _deps(FakeScheduledTaskStore())
+    deps.profile_store = Mock()
+    deps.profile_store.get.return_value = None
+    error = await fire_mod._validate_fire_session_inputs(
+        deps, _task(profile_id="deleted"), validate_workspace=False
+    )
+    assert error == ("Profile not found", "not_found")
+    assert deps.conversation_store.created == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("auth_enabled", [False, True])
+async def test_legacy_task_uses_owner_default_profile(auth_enabled: bool) -> None:
+    from unittest.mock import Mock
+
+    deps = _deps(FakeScheduledTaskStore())
+    deps.profile_store = Mock()
+    deps.single_user_owner = "local" if auth_enabled else None
+    deps.profile_store.ensure_default.return_value.id = "default"
+    await fire_mod._create_session(deps, _task())
+    assert deps.conversation_store.created[0]["profile_id"] == "default"
+    deps.profile_store.ensure_default.assert_called_once_with(
+        user_id="local" if auth_enabled else None
+    )
+
+
+@pytest.mark.asyncio
+async def test_task_inherits_project_profile() -> None:
+    deps = _deps(
+        FakeScheduledTaskStore(),
+        project_store=FakeProjectStore({("project", None)}, "work"),
+        single_user_owner=None,
+    )
+    await fire_mod._create_session(deps, _task(project_id="project"))
+    assert deps.conversation_store.created[0]["profile_id"] == "work"
+
+
+@pytest.mark.asyncio
+async def test_continued_session_must_match_profile() -> None:
+    problem = await fire_mod.continued_session_problem(
+        _task(profile_id="work"),
+        _continued_session(profile_id="personal"),
+        host_store=None,
+        permission_store=None,
+    )
+    assert problem == ("the session belongs to another profile", "continued_session_incompatible")

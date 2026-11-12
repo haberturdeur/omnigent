@@ -52,6 +52,7 @@ class ScheduledTaskStore(ABC):
         agent_id: str,
         timezone: str,
         *,
+        profile_id: str | None = None,
         model_override: str | None = None,
         reasoning_effort: str | None = None,
         permission_mode: str | None = None,
@@ -79,6 +80,7 @@ class ScheduledTaskStore(ABC):
         :param timezone: IANA timezone the trigger is evaluated in.
         :param model_override: Optional LLM model override.
         :param reasoning_effort: Optional reasoning-effort hint.
+        :param profile_id: Profile for new sessions; None uses the owner's default.
         :param permission_mode: Optional native-harness permission mode
             (Claude Code), e.g. ``"acceptEdits"``.
         :param max_cost_usd: Optional per-firing cost budget in USD.
@@ -155,6 +157,7 @@ class ScheduledTaskStore(ABC):
         rrule: str | None = None,
         agent_id: str | None = None,
         timezone: str | None = None,
+        profile_id: str | None = _UNSET,
         model_override: str | None = _UNSET,
         reasoning_effort: str | None = _UNSET,
         permission_mode: str | None = _UNSET,
@@ -174,7 +177,8 @@ class ScheduledTaskStore(ABC):
 
         Most parameters use ``None`` to mean "leave unchanged". For the per-task
         overrides (``model_override``, ``reasoning_effort``,
-        ``permission_mode``), ``host_id``, ``project_id``, ``max_cost_usd``, ``session_id``, and
+        ``permission_mode``), ``profile_id``, ``host_id``, ``project_id``,
+        ``max_cost_usd``, ``session_id``, and
         ``last_run_conversation_id``, the sentinel default means "not provided /
         leave unchanged"; passing ``None`` explicitly sets the column to NULL —
         so resetting an override to the agent default actually clears it (e.g.

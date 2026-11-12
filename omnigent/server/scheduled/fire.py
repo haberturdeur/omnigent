@@ -75,6 +75,7 @@ from starlette.datastructures import Headers
 from omnigent.db.account_authority import account_authority_scope
 from omnigent.db.db_models import workspace_scope
 from omnigent.entities import Conversation, ScheduledTask, ScheduledTaskRun
+from omnigent.entities.project import Project
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.mcp_selection import mcp_selection_revision
 from omnigent.server.auth import LEVEL_OWNER, LEVEL_READ, RESERVED_USER_LOCAL, RESERVED_USER_PUBLIC
@@ -191,6 +192,7 @@ class FireDeps:
     permission_store: Any | None
     host_store: Any | None
     host_registry: Any | None
+    profile_store: Any | None = None
     policy_store: Any | None = None
     agent_cache: Any | None = None
     runner_router: Any | None = None
@@ -823,6 +825,8 @@ async def continued_session_problem(
         return "the session is archived", "continued_session_archived"
     if conv.parent_conversation_id is not None:
         return "the session is a sub-agent's session", "continued_session_incompatible"
+    if task.profile_id is not None and conv.profile_id != task.profile_id:
+        return "the session belongs to another profile", "continued_session_incompatible"
     if conv.agent_id != task.agent_id:
         return "the session runs a different agent", "continued_session_incompatible"
     # A pin the task changed since would otherwise be ignored silently: the
@@ -1270,7 +1274,7 @@ async def _agent_revision(deps: FireDeps, conv: Conversation) -> str | None:
     )
 
 
-async def _fire_project_id(deps: FireDeps, task: ScheduledTask) -> str | None:
+async def _fire_project(deps: FireDeps, task: ScheduledTask) -> Project | None:
     """Return the project to file a fired session into, or ``None``.
 
     A deleted project leaves the session unfiled and is cleared from the task.
@@ -1294,7 +1298,7 @@ async def _fire_project_id(deps: FireDeps, task: ScheduledTask) -> str | None:
         except Exception:
             _logger.exception("scheduled fire: task %s could not clear its project", task.id)
         return None
-    return project.id
+    return project
 
 
 def _session_labels(task: ScheduledTask) -> dict[str, str]:
@@ -1311,17 +1315,38 @@ def _session_labels(task: ScheduledTask) -> dict[str, str]:
     return labels
 
 
+def _profile_owner(deps: FireDeps, task: ScheduledTask) -> str | None:
+    # Tasks store the local owner as NULL; profiles preserve the auth identity.
+    return task.user_id if task.user_id is not None else deps.single_user_owner
+
+
 async def _create_session(deps: FireDeps, task: ScheduledTask) -> Conversation:
     """Create a conversation bound to the task's agent, carrying the stored spec."""
+    project = await _fire_project(deps, task)
+    profile_id = task.profile_id
+    if project is not None:
+        inherited = project.profile_id
+        if inherited is not None:
+            if profile_id is not None and profile_id != inherited:
+                raise OmnigentError(
+                    "Project belongs to another profile", code=ErrorCode.INVALID_INPUT
+                )
+            profile_id = inherited
+    if profile_id is None and deps.profile_store is not None:
+        profile = await asyncio.to_thread(
+            deps.profile_store.ensure_default, user_id=_profile_owner(deps, task)
+        )
+        profile_id = profile.id
     conv: Conversation = await asyncio.to_thread(
         deps.conversation_store.create_conversation,
         agent_id=task.agent_id,
+        profile_id=profile_id,
         title=task.name,
         host_id=task.host_id,
         workspace=task.workspace,
         terminal_launch_args=await _permission_mode_launch_args(deps, task),
         labels=_session_labels(task),
-        project_id=await _fire_project_id(deps, task),
+        project_id=project.id if project is not None else None,
     )
     reasoning_effort = task.reasoning_effort
     if reasoning_effort is None:
@@ -1557,6 +1582,15 @@ async def _validate_fire_session_inputs(
     """Validate stored task fields before creating a conversation."""
     try:
         owner = task.user_id
+        if task.profile_id is not None:
+            if (
+                deps.profile_store is None
+                or await asyncio.to_thread(
+                    deps.profile_store.get, task.profile_id, user_id=_profile_owner(deps, task)
+                )
+                is None
+            ):
+                return "Profile not found", ErrorCode.NOT_FOUND
         agent = await validate_session_agent(
             user_id=owner,
             agent_id=task.agent_id,

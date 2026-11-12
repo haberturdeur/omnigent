@@ -120,6 +120,7 @@ def _to_entity(row: SqlScheduledTask) -> ScheduledTask:
         created_at=row.created_at,
         workspace_id=row.workspace_id or DEFAULT_WORKSPACE_ID,
         rrule=row.rrule,
+        profile_id=row.profile_id,
         model_override=row.model_override,
         reasoning_effort=row.reasoning_effort,
         permission_mode=row.permission_mode,
@@ -228,6 +229,7 @@ class SqlAlchemyScheduledTaskStore(ScheduledTaskStore):
         agent_id: str,
         timezone: str,
         *,
+        profile_id: str | None = None,
         model_override: str | None = None,
         reasoning_effort: str | None = None,
         permission_mode: str | None = None,
@@ -255,6 +257,7 @@ class SqlAlchemyScheduledTaskStore(ScheduledTaskStore):
                 user_id=user_id,
                 agent_id=agent_id,
                 timezone=timezone,
+                profile_id=profile_id,
                 model_override=model_override,
                 reasoning_effort=reasoning_effort,
                 permission_mode=permission_mode,
@@ -369,6 +372,7 @@ class SqlAlchemyScheduledTaskStore(ScheduledTaskStore):
         rrule: str | None = None,
         agent_id: str | None = None,
         timezone: str | None = None,
+        profile_id: str | None = _UNSET,
         model_override: str | None = _UNSET,
         reasoning_effort: str | None = _UNSET,
         permission_mode: str | None = _UNSET,
@@ -387,7 +391,8 @@ class SqlAlchemyScheduledTaskStore(ScheduledTaskStore):
 
         ``None`` leaves most fields unchanged. For the per-task overrides
         (``model_override``, ``reasoning_effort``, ``permission_mode``),
-        ``workspace``, ``host_id``, ``project_id``, ``max_cost_usd``, ``session_id``, and
+        ``profile_id``, ``workspace``, ``host_id``, ``project_id``, ``max_cost_usd``,
+        ``session_id``, and
         ``last_run_conversation_id``, the sentinel default means "not provided /
         leave unchanged"; passing ``None`` explicitly sets the column to NULL —
         so resetting an override to the agent default actually clears it (a set
@@ -424,6 +429,9 @@ class SqlAlchemyScheduledTaskStore(ScheduledTaskStore):
                 changed = True
             if timezone is not None and row.timezone != timezone:
                 row.timezone = timezone
+                changed = True
+            if profile_id is not _UNSET and row.profile_id != profile_id:
+                row.profile_id = profile_id
                 changed = True
             if model_override is not _UNSET and row.model_override != model_override:
                 row.model_override = model_override

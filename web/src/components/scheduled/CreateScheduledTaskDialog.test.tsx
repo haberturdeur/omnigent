@@ -33,6 +33,12 @@ import type { AvailableAgent } from "@/hooks/useAvailableAgents";
 import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
 import { SERVER_INFO_OFFLINE_FALLBACK } from "@/lib/bootCapabilities";
 
+vi.mock("@/lib/profilesApi", () => ({
+  useProfiles: () => ({
+    data: [{ id: "profile_work", name: "Work" }],
+    activeProfile: { id: "profile_work" },
+  }),
+}));
 vi.mock("@/hooks/useAvailableAgents", () => ({ useAvailableAgents: vi.fn() }));
 // useHostModelOptions is consumed by the ModelEffortFields sub-form (model
 // dropdown source). Returning no data makes it fall back to the static Claude
@@ -477,6 +483,7 @@ describe("CreateScheduledTaskDialog edit mode", () => {
       id: "st_1",
       input: {
         name: "Updated brief",
+        profileId: null,
         prompt: "Updated prompt",
         rrule: "FREQ=DAILY;BYHOUR=8;BYMINUTE=30",
         timezone: "America/Los_Angeles",
@@ -2026,4 +2033,30 @@ describe("scheduler capabilities", () => {
       expect(updateMutateAsync.mock.calls[0][0].input.rrule).toBe("FREQ=DAILY;BYHOUR=9;BYMINUTE=0");
     },
   );
+});
+
+describe("automation profiles", () => {
+  it("defaults a new automation to the active profile", async () => {
+    renderDialog();
+    expect(screen.getByTestId("task-profile-trigger")).toHaveTextContent("Work");
+    fireEvent.change(screen.getByTestId("task-name-input"), { target: { value: "Nightly" } });
+    fireEvent.change(screen.getByTestId("task-prompt-input"), { target: { value: "Do it" } });
+    fireEvent.click(screen.getByTestId("create-scheduled-task-submit"));
+    await waitFor(() =>
+      expect(mutateAsync).toHaveBeenCalledWith(
+        expect.objectContaining({ profileId: "profile_work" }),
+      ),
+    );
+  });
+
+  it("preserves the saved profile when editing from another profile", () => {
+    render(
+      <CreateScheduledTaskDialog
+        open
+        onOpenChange={vi.fn()}
+        editingTask={scheduledTask({ profileId: "profile_other" })}
+      />,
+    );
+    expect(screen.getByTestId("task-profile-trigger")).toHaveTextContent("Unavailable profile");
+  });
 });

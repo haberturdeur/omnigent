@@ -48,6 +48,7 @@ from omnigent.server.scheduled.rrule import RRuleSearchError, RRuleValidationErr
 from omnigent.server.scheduled.run_reconciler import force_fail_stale_runs
 from omnigent.stores import AgentStore, ConversationStore, PermissionStore
 from omnigent.stores.artifact_store import ArtifactStore
+from omnigent.stores.profile_store import ProfileStore
 from omnigent.stores.project_store import ProjectStore
 from omnigent.stores.scheduled_task_store import ScheduledTaskStore
 
@@ -62,7 +63,9 @@ _MANAGED_SANDBOX_WITH_HOST_MSG = (
 )
 _SESSION_ID_WITHOUT_CONTINUE_MSG = "session_id requires session_mode 'continue'"
 # A continued session cannot follow a change to these, so the next run starts a new one.
-_SESSION_BOUND_FIELDS = frozenset({"agent_id", "host_id", "workspace", "execution_target"})
+_SESSION_BOUND_FIELDS = frozenset(
+    {"agent_id", "host_id", "workspace", "execution_target", "profile_id"}
+)
 
 
 class CreateScheduledTaskRequest(BaseModel):
@@ -75,6 +78,7 @@ class CreateScheduledTaskRequest(BaseModel):
     rrule: str
     agent_id: str
     timezone: str = "UTC"
+    profile_id: str | None = Field(default=None, min_length=1)
     model_override: str | None = None
     reasoning_effort: str | None = None
     # Native-harness permission mode (Claude Code), e.g. "acceptEdits". The fire
@@ -126,6 +130,7 @@ class UpdateScheduledTaskRequest(BaseModel):
     # handler, which clears any the caller does not resend.
     agent_id: str | None = Field(default=None, min_length=1)
     timezone: str | None = None
+    profile_id: str | None = Field(default=None, min_length=1)
     model_override: str | None = None
     reasoning_effort: str | None = None
     permission_mode: str | None = None
@@ -199,6 +204,7 @@ def _to_response(
         # attribute are now ``user_id``.
         "owner_user_id": task.user_id,
         "agent_id": task.agent_id,
+        "profile_id": task.profile_id,
         "timezone": task.timezone,
         "created_at": task.created_at,
         "model_override": task.model_override,
@@ -289,6 +295,7 @@ def create_scheduled_tasks_router(
     agent_store: AgentStore,
     conversation_store: ConversationStore,
     permission_store: PermissionStore | None = None,
+    profile_store: ProfileStore | None = None,
     agent_cache: Any | None = None,
     auth_provider: AuthProvider | None = None,
     artifact_store: ArtifactStore | None = None,
@@ -320,6 +327,16 @@ def create_scheduled_tasks_router(
         ``RESERVED_USER_LOCAL`` so single-user rows are always owned."""
         user_id = require_user(request, auth_provider)
         return user_id if user_id is not None else RESERVED_USER_LOCAL
+
+    async def _validate_profile(profile_id: str | None, request: Request) -> None:
+        if profile_id is None:
+            return
+        user_id = require_user(request, auth_provider)
+        if (
+            profile_store is None
+            or await asyncio.to_thread(profile_store.get, profile_id, user_id=user_id) is None
+        ):
+            raise OmnigentError("Profile not found", code=ErrorCode.NOT_FOUND)
 
     def _scheduler(request: Request) -> Any | None:
         """The live scheduler off app state, or ``None`` if not running."""
@@ -424,7 +441,9 @@ def create_scheduled_tasks_router(
         # Match /v1/projects owner scoping ("local" in single-user mode).
         return None if auth_provider is None else owner
 
-    async def _owned_project_id(project_owner: str | None, project_id: str) -> str:
+    async def _owned_project_id(
+        project_owner: str | None, project_id: str, profile_id: str | None = None
+    ) -> str:
         """Return *project_id* if it is one of the owner's projects, else a 404."""
         if project_store is None:
             raise OmnigentError(
@@ -433,6 +452,8 @@ def create_scheduled_tasks_router(
         project = await asyncio.to_thread(project_store.get, project_id, user_id=project_owner)
         if project is None:
             raise OmnigentError("Project not found", code=ErrorCode.NOT_FOUND)
+        if profile_id is not None and project.profile_id not in (None, profile_id):
+            raise OmnigentError("Project belongs to another profile", code=ErrorCode.INVALID_INPUT)
         return project.id
 
     async def _bind_agent(agent: Agent, owner_id: str | None) -> Agent:
@@ -492,6 +513,7 @@ def create_scheduled_tasks_router(
     ) -> dict[str, Any]:
         """Create a scheduled task and arm it on the live scheduler."""
         owner = _owner(request)
+        await _validate_profile(body.profile_id, request)
         await _validate_rrule_or_400(body.rrule)
         _validate_timezone_or_400(body.timezone)
         permission_mode = validate_session_permission_mode(body.permission_mode)
@@ -525,6 +547,7 @@ def create_scheduled_tasks_router(
                     user_id=owner_id,
                     agent_id=agent.id,
                     timezone=body.timezone,
+                    profile_id=body.profile_id,
                     created_at=0,
                     workspace=workspace,
                     host_id=body.host_id,
@@ -541,7 +564,9 @@ def create_scheduled_tasks_router(
         project_id: str | None = None
         try:
             if body.project_id is not None:
-                project_id = await _owned_project_id(project_owner, body.project_id)
+                project_id = await _owned_project_id(
+                    project_owner, body.project_id, body.profile_id
+                )
             task = store.create(
                 scheduled_task_id=task_id,
                 name=body.name,
@@ -550,6 +575,7 @@ def create_scheduled_tasks_router(
                 user_id=owner_id,
                 agent_id=bound.id,
                 timezone=body.timezone,
+                profile_id=body.profile_id,
                 model_override=model_override,
                 reasoning_effort=reasoning_effort,
                 permission_mode=permission_mode,
@@ -764,6 +790,8 @@ def create_scheduled_tasks_router(
         owner = _owner(request)
         owner_id = None if owner == RESERVED_USER_LOCAL else owner
         existing = _require_owned(scheduled_task_id, owner_id)
+        if "profile_id" in body.model_fields_set:
+            await _validate_profile(body.profile_id, request)
         if body.rrule is not None:
             await _validate_rrule_or_400(body.rrule)
         if body.timezone is not None:
@@ -880,6 +908,7 @@ def create_scheduled_tasks_router(
                             "execution_target",
                             "session_mode",
                             "session_id",
+                            "profile_id",
                         )
                         if name in fields
                     },
@@ -893,8 +922,11 @@ def create_scheduled_tasks_router(
                 fields["host_id"] = picked.host_id
         project_owner = _project_owner(owner)
         try:
-            if fields.get("project_id") is not None:
-                fields["project_id"] = await _owned_project_id(project_owner, fields["project_id"])
+            target_project = fields.get("project_id", existing.project_id)
+            if target_project is not None and {"project_id", "profile_id"}.intersection(fields):
+                await _owned_project_id(
+                    project_owner, target_project, fields.get("profile_id", existing.profile_id)
+                )
             updated = store.update(scheduled_task_id, **fields)
             if updated is None:
                 raise OmnigentError("Scheduled task not found", code=ErrorCode.NOT_FOUND)

@@ -2068,6 +2068,7 @@ def create_app(
 
             fire_deps = FireDeps(
                 scheduled_task_store=scheduled_task_store,
+                profile_store=profile_store,
                 agent_store=agent_store,
                 conversation_store=conversation_store,
                 permission_store=permission_store,
@@ -3958,6 +3959,7 @@ def create_app(
         app.include_router(
             create_scheduled_tasks_router(
                 scheduled_task_store,
+                profile_store=profile_store,
                 agent_store=agent_store,
                 conversation_store=conversation_store,
                 permission_store=permission_store,

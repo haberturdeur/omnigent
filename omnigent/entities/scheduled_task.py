@@ -41,6 +41,7 @@ class ScheduledTask:
     :param timezone: IANA timezone the trigger is evaluated in,
         e.g. ``"America/Los_Angeles"``.
     :param created_at: Unix epoch seconds at row creation.
+    :param profile_id: Profile for spawned sessions; None uses the owner's default.
     :param model_override: Per-task LLM model override, e.g.
         ``"claude-opus-4-7"``. ``None`` means use the agent default.
     :param reasoning_effort: Per-task reasoning-effort hint, e.g. ``"high"``.
@@ -88,6 +89,7 @@ class ScheduledTask:
     timezone: str
     created_at: int
     workspace_id: int = 0
+    profile_id: str | None = None
     model_override: str | None = None
     reasoning_effort: str | None = None
     permission_mode: str | None = None

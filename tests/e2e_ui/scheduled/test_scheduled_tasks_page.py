@@ -1028,3 +1028,33 @@ def test_scheduled_task_trigger_template_creates_hourly_manager_task(
     assert created["rrule"].startswith("FREQ=HOURLY"), created
     # The prompt's details are covered by the dialog and renderer tests.
     assert '(project = "ES" AND labels = "omnigent")' in created["prompt"], created
+
+
+@pytest.mark.usefixtures("online_host")
+def test_automation_profile_selector_persists_on_create_and_edit(
+    page: Page, live_server: str
+) -> None:
+    response = httpx.post(
+        f"{live_server}/v1/profiles", json={"name": "Automation work"}, timeout=10.0
+    )
+    response.raise_for_status()
+    profile_id = response.json()["id"]
+    _open_automations_page(page, live_server)
+    _open_create_dialog(page)
+    page.get_by_test_id("task-name-input").fill("Profile automation")
+    page.get_by_test_id("task-prompt-input").fill("Summarize the day.")
+    _pick_select_option(page, "task-profile-trigger", "Automation work")
+    page.get_by_test_id("create-scheduled-task-submit").click()
+    row = _row_by_name(page, "Profile automation")
+    expect(row).to_be_visible(timeout=30_000)
+    tasks = httpx.get(f"{live_server}/v1/scheduled-tasks", timeout=10.0).json()["scheduled_tasks"]
+    task = next(task for task in tasks if task["name"] == "Profile automation")
+    assert task["profile_id"] == profile_id
+    row.get_by_test_id("task-row-menu").click()
+    page.get_by_test_id("task-edit").click()
+    expect(page.get_by_test_id("task-profile-trigger")).to_have_text("Automation work")
+    _pick_select_option(page, "task-profile-trigger", "Default profile")
+    page.get_by_test_id("create-scheduled-task-submit").click()
+    expect(page.get_by_test_id("create-scheduled-task-dialog")).not_to_be_visible()
+    saved = httpx.get(f"{live_server}/v1/scheduled-tasks/{task['id']}", timeout=10.0)
+    assert saved.json()["profile_id"] is None

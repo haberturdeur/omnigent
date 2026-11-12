@@ -70,6 +70,7 @@ import {
   type ScheduledTaskExecutionTarget,
   type ScheduledTaskSessionMode,
 } from "@/lib/scheduledTasksApi";
+import { useProfiles } from "@/lib/profilesApi";
 import { localTimezone } from "@/lib/timezones";
 
 export function CreateScheduledTaskDialog({
@@ -113,6 +114,8 @@ export function CreateScheduledTaskDialog({
   // Provider-named label for the sandbox host option (e.g. "Modal Sandbox"),
   // falling back to the generic "New Sandbox" — same helper the New Chat picker uses.
   const sandboxLabel = sandboxOptionLabel(info !== "loading" ? info.sandbox_provider : null);
+  const { data: profiles, activeProfile } = useProfiles();
+  const [profileId, setProfileId] = useState<string | null>(null);
   const createMutation = useCreateScheduledTask();
   const updateMutation = useUpdateScheduledTask();
   const isEdit = editingTask !== null;
@@ -285,6 +288,7 @@ export function CreateScheduledTaskDialog({
       setTimezone(editingTask?.timezone ?? localTimezone());
       if (editingTask) {
         const parsedSchedule = savedSchedule;
+        setProfileId(editingTask.profileId ?? null);
         setName(editingTask.name);
         setPrompt(editingTask.prompt);
         setPickedAgentId(editingTask.agentId);
@@ -303,6 +307,7 @@ export function CreateScheduledTaskDialog({
         setStartNewSession(false);
         setTrigger(null);
       } else {
+        setProfileId(activeProfile?.id ?? null);
         setName(initialTrigger ? TRIGGER_TEMPLATES[initialTrigger].name : (initialName ?? ""));
         setPrompt(initialPrompt ?? "");
         setPickedAgentId(null);
@@ -325,7 +330,15 @@ export function CreateScheduledTaskDialog({
       setError(null);
     }
     wasOpen.current = open;
-  }, [open, initialName, initialPrompt, initialTrigger, editingTask, savedSchedule]);
+  }, [
+    open,
+    initialName,
+    initialPrompt,
+    initialTrigger,
+    editingTask,
+    savedSchedule,
+    activeProfile?.id,
+  ]);
 
   // A new task pins a host, starting on the first online one as New Chat does.
   const defaultHostId = hosts?.find((h) => h.status === "online")?.host_id;
@@ -443,6 +456,7 @@ export function CreateScheduledTaskDialog({
         ? editingTask.executionTarget !== executionTarget
         : sandboxMode;
       const input = {
+        profileId,
         name: name.trim(),
         prompt: effectivePrompt.trim(),
         rrule: buildRRule(schedule),
@@ -633,6 +647,38 @@ export function CreateScheduledTaskDialog({
               />
             </div>
           )}
+
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="task-profile">Profile</Label>
+            <Select
+              value={profileId ?? "__default_profile__"}
+              onValueChange={(value) =>
+                setProfileId(value === "__default_profile__" ? null : value)
+              }
+              onOpenChange={handleSelectOpenChange}
+              componentId="tasks.scheduled.profile"
+            >
+              <SelectTrigger
+                id="task-profile"
+                data-testid="task-profile-trigger"
+                className="w-full"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent position="popper" align="start">
+                <SelectItem value="__default_profile__">Default profile</SelectItem>
+                {profileId && !profiles?.some((profile) => profile.id === profileId) && (
+                  <SelectItem value={profileId}>Unavailable profile</SelectItem>
+                )}
+                {(profiles ?? []).map((profile) => (
+                  <SelectItem key={profile.id} value={profile.id}>
+                    {profile.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-sm text-muted-foreground">New sessions run under this profile.</p>
+          </div>
 
           <ScheduleFields
             timezone={timezone}

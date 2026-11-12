@@ -2301,3 +2301,20 @@ def test_an_executor_records_succeeded_for_a_prompt_delivered_into_a_session(
     assert (delivered.status, delivered.conversation_id) == ("succeeded", _uid("c1"))
     assert delivered.finished_at == now + 30
     assert delivered.lease_expires_at is None
+
+
+def test_profile_can_be_saved_changed_and_cleared(store: SqlAlchemyScheduledTaskStore) -> None:
+    task = store.create(
+        scheduled_task_id=_uid("profile_task"),
+        name="Profile task",
+        prompt="Summarize",
+        rrule="FREQ=DAILY",
+        user_id=None,
+        agent_id=_uid("agent"),
+        timezone="UTC",
+        profile_id=_uid("work"),
+    )
+    assert store.get(task.id).profile_id == _uid("work")
+    assert store.update(task.id, name="Renamed").profile_id == _uid("work")
+    assert store.update(task.id, profile_id=_uid("personal")).profile_id == _uid("personal")
+    assert store.update(task.id, profile_id=None).profile_id is None

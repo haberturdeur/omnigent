@@ -199,10 +199,12 @@ describe("createScheduledTask", () => {
       rrule: "FREQ=DAILY;BYHOUR=9;BYMINUTE=0",
       agentId: "ag_1",
       timezone: "UTC",
+      profileId: "work",
       hostId: "host_1",
       workspace: "/home/me/repo",
     });
     const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.profile_id).toBe("work");
     expect(body.timezone).toBe("UTC");
     expect(body.host_id).toBe("host_1");
     expect(body.workspace).toBe("/home/me/repo");
@@ -275,4 +277,14 @@ describe("error path", () => {
     expect(err.status).toBe(500);
     expect(err.code).toBeNull();
   });
+});
+
+it("round-trips and clears the selected profile on update", async () => {
+  fetchMock.mockResolvedValueOnce(mockResponse({ ...TASK_WIRE, profile_id: "work" }));
+  const updated = await updateScheduledTask("st_1", { profileId: "work" });
+  expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ profile_id: "work" });
+  expect(updated.profileId).toBe("work");
+  fetchMock.mockResolvedValueOnce(mockResponse({ ...TASK_WIRE, profile_id: null }));
+  await updateScheduledTask("st_1", { profileId: null });
+  expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({ profile_id: null });
 });
